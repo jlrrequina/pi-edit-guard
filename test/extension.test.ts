@@ -296,6 +296,22 @@ test("retention: keepRuns from config.json keeps the newest runs of the session"
   }
 });
 
+test("session_start sweeps the store of a deleted project in the background", async () => {
+  const p = project();
+  const gone = tempDir("peg-gone-");
+  try {
+    const { openStore } = await import("../guard/snapshot.ts");
+    const stale = await openStore(join(p.agent, "pi-edit-guard"), { root: gone, git: false }, []);
+    cleanup(gone);
+    const h = new Harness(p.root);
+    await h.startSession();
+    for (let i = 0; i < 50 && existsSync(stale.dir); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(!existsSync(stale.dir));
+  } finally {
+    p.done();
+  }
+});
+
 test("snapshot failure: the call runs, one warning per run, and /undo refuses the run", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
   const p = project();
   try {

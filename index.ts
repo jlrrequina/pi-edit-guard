@@ -108,12 +108,7 @@ export default function piEditGuard(pi: ExtensionAPI): void {
       const root = await findRoot(ctx.cwd);
       const refused = await refuseRoot(root, config.exclude);
       if (refused) throw new Error(`no snapshots for ${refused}`);
-      const store = await openStore(base(), root, config.exclude);
-      void sweepStores(base(), config.storeMaxAgeDays, storeDir(base(), root.root)).then(
-        (removed) => removed.length && debug("sweep", { removed }),
-        (err) => debug("sweep-failed", { error: message(err) }),
-      );
-      return store;
+      return openStore(base(), root, config.exclude);
     })();
     return storePromise;
   }
@@ -230,6 +225,13 @@ export default function piEditGuard(pi: ExtensionAPI): void {
       session = "unknown";
     }
     rebuild(ctx);
+    // Stores of deleted projects and stores unused for storeMaxAgeDays go, in the background.
+    void findRoot(ctx.cwd)
+      .then((root) => sweepStores(base(), config.storeMaxAgeDays, storeDir(base(), root.root)))
+      .then(
+        (removed) => removed.length && debug("sweep", { removed }),
+        (err) => debug("sweep-failed", { error: message(err) }),
+      );
   });
 
   // Re-reading after compaction or a branch switch is legitimate: both count as a change, at a seq of their own
@@ -346,6 +348,7 @@ export default function piEditGuard(pi: ExtensionAPI): void {
       }
     }
     calls.set(event.toolCallId, call);
+    debug("allow", { tool, seq, mutating: call.mutating, ...(call.flag ? { repeat: call.flag } : {}), ...(call.read ? { observed: call.read.key } : {}) });
     return undefined;
   });
 
@@ -420,6 +423,10 @@ export default function piEditGuard(pi: ExtensionAPI): void {
           name = `run ${n}`;
           if (n === 0) {
             ctx.ui.notify("edit-guard: no run of this session changed anything yet.", "info");
+            return;
+          }
+          if (n > latest) {
+            ctx.ui.notify(`edit-guard: ${name} does not exist; the latest run of this session is run ${latest}.`, "warning");
             return;
           }
           target = all.find((c) => c.kind === "run" && c.n === n);
