@@ -6,8 +6,9 @@
  *   PI_EDIT_GUARD_E2E_MODEL=anthropic/claude-haiku-4-5 npm run e2e
  *
  * Without the variable, π's default model is used. Sessions go to a temp
- * directory; the private store created under the agent directory for the
- * temp root is deleted at the end.
+ * directory; the private stores created under the agent directory for the
+ * temp roots are deleted at the end. The second test runs the same flow in
+ * shallow clones of public repositories (PI_EDIT_GUARD_E2E_REPOS=0 skips it).
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -90,5 +91,49 @@ test("live: pi -p reads and edits through the guard; one run ref per run; the pr
   } finally {
     cleanup(root, sessionDir);
     if (existsSync(store.dir)) rmSync(store.dir, { recursive: true, force: true });
+  }
+});
+
+const REPOS = [
+  { url: "https://github.com/expressjs/express", file: "index.js", comment: "//" },
+  { url: "https://github.com/pallets/flask", file: "src/flask/__init__.py", comment: "#" },
+  { url: "https://github.com/BurntSushi/ripgrep", file: "crates/core/main.rs", comment: "//" },
+];
+
+test("live on public repositories: a real edit through the guard, then /undo through π's command dispatch restores it exactly", { timeout: 1_800_000, skip: process.env.PI_EDIT_GUARD_E2E_REPOS === "0" }, async () => {
+  const base = tempDir("peg-e2e-repos-");
+  const stores: string[] = [];
+  try {
+    for (const repo of REPOS) {
+      const root = join(base, repo.url.split("/").pop()!);
+      spawnSync("git", ["clone", "--quiet", "--depth", "1", "--single-branch", "--no-tags", repo.url, root], { stdio: "inherit" });
+      const sessionDir = tempDir("peg-e2e-sessions-");
+      const sid = randomUUID();
+      const store = { dir: storeDir(join(agentDir, "pi-edit-guard"), realpathSync.native(root)), root: realpathSync.native(root), git: true };
+      stores.push(store.dir);
+      const original = readFileSync(join(root, repo.file), "utf8");
+      const gitBefore = projectGitState(root);
+      const line = `${repo.comment} edited through pi-edit-guard`;
+      const edit = pi(root, sessionDir, sid, `Read ${repo.file} with the read tool, then use the edit tool to insert this exact line as the new first line of the file: ${line}  Do nothing else. Reply DONE.`);
+      assert.equal(edit.status, 0, edit.out);
+      const edited = readFileSync(join(root, repo.file), "utf8");
+      assert.ok(edited.startsWith(`${line}\n`) && edited.endsWith(original), `${repo.url}: the model made exactly the edit`);
+      const { file, entries } = sessionEntries(sessionDir);
+      assert.ok(entries.some((e) => e.type === "custom" && e.customType === OBSERVATION_TYPE));
+      assert.deepEqual((await runGit(store, ["for-each-ref", "--format=%(refname)"])).stdout.toString().trim().split("\n"), [`refs/runs/${sid}/1`]);
+      const undo = pi(root, sessionDir, file, "/undo --yes");
+      assert.equal(undo.status, 0, undo.out);
+      assert.equal(readFileSync(join(root, repo.file), "utf8"), original, `${repo.url}: /undo restored the file`);
+      const refs = (await runGit(store, ["for-each-ref", "--format=%(refname)"])).stdout.toString().trim().split("\n").sort();
+      assert.deepEqual(refs, [`refs/pre-undo/${sid}/1`, `refs/runs/${sid}/1`]);
+      assert.deepEqual(projectGitState(root), gitBefore, `${repo.url}: .git untouched`);
+      const dirty = spawnSync("git", ["diff", "--quiet", "HEAD"], { cwd: root, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }).status;
+      assert.equal(dirty, 0, `${repo.url}: the working tree equals HEAD again`);
+      console.log(`${repo.url}: edit ${edit.ms} ms, /undo ${undo.ms} ms, restored and .git untouched`);
+      cleanup(sessionDir);
+    }
+  } finally {
+    cleanup(base);
+    for (const s of stores) rmSync(s, { recursive: true, force: true });
   }
 });
