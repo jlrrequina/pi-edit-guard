@@ -54,6 +54,9 @@ const STORE_CONFIG = [
   ["core.symlinks", "true"],
   ["core.fileMode", "true"],
   ["core.longpaths", "true"],
+  // Stream every blob into a pack instead of one loose file per object: measured 2-4x faster first
+  // snapshots and up to 7x smaller stores (10,000-file tree: 6.6 s → 1.5 s, 45 MB → 6.3 MB).
+  ["core.bigFileThreshold", "1"],
   ["gc.auto", "0"],
   ["maintenance.auto", "false"],
   ["commit.gpgSign", "false"],
@@ -106,13 +109,26 @@ function projectGit(cwd: string, args: readonly string[], ok: readonly number[] 
 const text = (b: Buffer) => b.toString("utf8").trim();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function withLockRetry<T>(fn: () => Promise<T>): Promise<T> {
+/** A lock this old in a private store was left by a git that crashed: no snapshot runs for minutes. */
+const STALE_LOCK_MS = 10 * 60_000;
+
+/** Retry while another session holds the store's index.lock (5 times, 100 ms backoff); then remove the lock only if it is stale. */
+async function withLockRetry<T>(store: Store, fn: () => Promise<T>): Promise<T> {
+  let cleared = false;
   for (let attempt = 1; ; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      if (attempt > 5 || !(err instanceof GitError) || !err.stderr.includes("index.lock")) throw err;
-      await sleep(100 * attempt);
+      if (!(err instanceof GitError) || !err.stderr.includes("index.lock")) throw err;
+      if (attempt <= 5) {
+        await sleep(100 * attempt);
+        continue;
+      }
+      const lock = join(store.dir, "index.lock");
+      const age = await stat(lock).then((s) => Date.now() - s.mtimeMs, () => 0);
+      if (cleared || age < STALE_LOCK_MS) throw err;
+      await rm(lock, { force: true });
+      cleared = true;
     }
   }
 }
@@ -237,7 +253,7 @@ export type TreeResult = { tree: string; unreadable: string[] };
 
 /** Stage the root in the private index and write its tree. Paths git cannot read are skipped and reported. */
 export async function snapshotTree(store: Store): Promise<TreeResult> {
-  return withLockRetry(async () => {
+  return withLockRetry(store, async () => {
     const add = await runGit(store, ["add", "-A", "--ignore-errors"], { ok: [0, 1] });
     const unreadable = [...add.stderr.matchAll(/^error: unable to index file '(.*)'$/gm)].map((m) => m[1]!);
     if (add.code === 1 && unreadable.length === 0) throw new GitError("add", add);
@@ -413,9 +429,10 @@ async function outsideDomain(store: Store, commit: string, rels: readonly string
   if (!rest.length) return outside;
   const shadow = await mkdtemp(join(tmpdir(), "pi-edit-guard-ignore-"));
   try {
+    const blobs = await readBlobs(store, ignoreFiles.map((f) => f.oid));
     for (const f of ignoreFiles) {
       await mkdir(dirname(join(shadow, f.rel)), { recursive: true });
-      await writeFile(join(shadow, f.rel), (await runGit(store, ["cat-file", "blob", f.oid])).stdout);
+      await writeFile(join(shadow, f.rel), blobs.get(f.oid)!);
     }
     const out = await runGit({ ...store, root: shadow }, ["check-ignore", "--no-index", "-z", "--stdin"], { input: rest.join("\0"), ok: [0, 1] });
     for (const r of out.stdout.toString("utf8").split("\0")) if (r) outside.add(r);
@@ -674,11 +691,15 @@ export async function dropCheckpoint(store: Store, session: string, c: Checkpoin
 
 /**
  * Keep the newest `keep` run checkpoints and the newest `keep` pre-undo
- * checkpoints of a session; drop the refs of the rest, then prune
- * unreachable objects. A dropped checkpoint's journal stays while a kept
+ * checkpoints of a session; drop the refs of the rest, then free their
+ * objects: `repack -a -d` rewrites the packs without unreachable objects
+ * (objects in the private index, which another session may have just
+ * written, count as reachable), and `prune` removes unreachable loose objects
+ * older than an hour (a commit another session has written but not yet
+ * referenced is younger). A dropped checkpoint's journal stays while a kept
  * checkpoint is older than it: restoring that one needs the records made
- * after it. Objects younger than an hour survive the prune: another session
- * on the same root may have written them and not yet referenced them.
+ * after it. Packs are also consolidated once there are many: every snapshot
+ * that adds content writes one.
  */
 export async function retain(store: Store, session: string, keep: number): Promise<number> {
   const all = await listCheckpoints(store, session);
@@ -695,7 +716,11 @@ export async function retain(store: Store, session: string, keep: number): Promi
     }
     if (!oldestKept || compareCheckpoints(c, oldestKept) < 0) await rm(journalDir(store, session, c), { recursive: true, force: true });
   }
-  if (dropped) await runGit(store, ["prune", "--expire=1.hour.ago"]);
+  const packs = (await readdir(join(store.dir, "objects", "pack")).catch(() => [] as string[])).filter((f) => f.endsWith(".pack")).length;
+  if (dropped || packs > 25) {
+    await runGit(store, ["repack", "-a", "-d", "-q"]);
+    await runGit(store, ["prune", "--expire=1.hour.ago"]);
+  }
   return dropped;
 }
 

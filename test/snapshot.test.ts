@@ -207,6 +207,24 @@ test("retention keeps the journal of a dropped checkpoint while a kept, older ch
   }
 });
 
+test("index.lock: a lock held by another session fails the snapshot after the retries; a stale lock from a crashed git is cleared", async () => {
+  const { root, base, outside, store } = await setup(true);
+  try {
+    const lock = join(store.dir, "index.lock");
+    writeFileSync(lock, "");
+    const started = Date.now();
+    await assert.rejects(createCheckpoint(store, SESSION, { kind: "run", n: 1 }), /index\.lock/);
+    assert.ok(Date.now() - started >= 1400, "five retries with 100 ms backoff");
+    const { utimesSync } = await import("node:fs");
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(lock, old, old);
+    await createCheckpoint(store, SESSION, { kind: "run", n: 1 });
+    assert.ok(!existsSync(lock));
+  } finally {
+    cleanup(root, base, outside);
+  }
+});
+
 test("roots: the home directory and large plain directories are refused; a git root never is", async () => {
   const { homedir } = await import("node:os");
   assert.match((await refuseRoot({ root: homedir(), git: false }, [])) ?? "", /home directory/);
