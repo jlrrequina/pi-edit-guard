@@ -1,0 +1,71 @@
+{
+  "name": "@lenard9191/pi-edit-guard",
+  "version": "0.0.0",
+  "description": "Pi (π) coding-agent extension: blocks edits to files that changed since the agent read them, snapshots the project before each run so /undo restores it exactly, and stops repeated identical tool calls.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "John Lenard Requina"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "pi-coding-agent",
+    "coding-agent",
+    "ai-agent",
+    "agent-harness",
+    "guardrails",
+    "undo",
+    "checkpoints",
+    "snapshots",
+    "stale-read",
+    "compare-and-swap",
+    "loop-detection",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/jlrrequina/pi-edit-guard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jlrrequina/pi-edit-guard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jlrrequina/pi-edit-guard/issues"
+  },
+  "files": [
+    "index.ts",
+    "config.ts",
+    "guard/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.2.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-coding-agent": "1.3.0",
+    "@types/node": "^24.19.2",
+    "fast-check": "4.10.2",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "e2e": "node test/e2e.ts",
+    "corpus": "node scripts/corpus.ts",
+    "prepublishOnly": "npm run check && npm test"
+  }
+}
