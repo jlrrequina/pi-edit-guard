@@ -33,7 +33,7 @@ export type Store = { dir: string; root: string; git: boolean };
 
 export type GitOutput = { code: number; stdout: Buffer; stderr: string };
 
-export class GitError extends Error {
+class GitError extends Error {
   readonly code: number;
   readonly stderr: string;
   constructor(command: string, out: GitOutput) {
@@ -152,7 +152,7 @@ export async function findRoot(cwd: string): Promise<Root> {
 }
 
 /** Refuse roots whose snapshot would copy far more than a project: the home directory, a file-system root, or a large directory outside git. */
-export const NON_GIT_LIMITS = { files: 20_000, bytes: 500 * 1024 * 1024 };
+const NON_GIT_LIMITS = { files: 20_000, bytes: 500 * 1024 * 1024 };
 
 export async function refuseRoot(root: Root, exclude: readonly string[]): Promise<string | undefined> {
   if (root.root === parsePath(root.root).root) return `${root.root} is a file-system root`;
@@ -238,7 +238,7 @@ export const checkpointName = (c: CheckpointId) => (c.kind === "run" ? `run-${c.
 export const refName = (session: string, c: CheckpointId) => (c.kind === "run" ? `refs/runs/${session}/${c.n}` : `refs/pre-undo/${session}/${c.k}`);
 const orderOf = (c: CheckpointId): [number, number] => (c.kind === "run" ? [c.n, 0] : [c.afterRun, c.k]);
 /** Checkpoints of a session in time order: run n, then the undos made after run n, then run n+1. */
-export function compareCheckpoints(a: CheckpointId, b: CheckpointId): number {
+function compareCheckpoints(a: CheckpointId, b: CheckpointId): number {
   const [x1, y1] = orderOf(a);
   const [x2, y2] = orderOf(b);
   return x1 - x2 || y1 - y2;
@@ -479,7 +479,7 @@ async function listTree(store: Store, commit: string): Promise<Map<string, { mod
  *                                            tree once the path entered the domain
  *   outside the root                         the earliest journal entry, if any
  */
-export async function planRestore(store: Store, session: string, target: Checkpoint, cur: string): Promise<Plan> {
+async function planRestore(store: Store, session: string, target: Checkpoint, cur: string): Promise<Plan> {
   if (!target.commit) throw new Error(`${checkpointName(target)} has no snapshot`);
   const diff = parseRawDiff((await runGit(store, ["diff-tree", "-r", "-z", "--no-renames", "--no-abbrev", "--raw", target.commit, cur])).stdout);
   const later = (await listCheckpoints(store, session)).filter((c) => c.commit && compareCheckpoints(c, target) > 0);
@@ -752,7 +752,7 @@ export async function sweepStores(base: string, maxAgeDays: number, keepDir: str
 }
 
 /** For display: a path relative to the root when inside it. */
-export function shown(store: Store, path: string): string {
+function shown(store: Store, path: string): string {
   return insideRoot(store.root, path) ?? path;
 }
 

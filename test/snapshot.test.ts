@@ -1,6 +1,6 @@
 /** Snapshot, journal and restore on fixed scenarios (the property test randomizes them). */
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, retain, runGit, refuseRoot, sweepStores, storeDir } from "../guard/snapshot.ts";
@@ -183,6 +183,7 @@ test("refs live only in the private store, one per run; retention keeps the newe
     const left = await listCheckpoints(store, SESSION);
     assert.deepEqual(left.filter((c) => c.commit).map((c) => (c as { n: number }).n), [4, 5]);
     assert.ok(store.dir.startsWith(base) && readFileSync(join(store.dir, "ROOT"), "utf8").trim() === root);
+    if (process.platform !== "win32") assert.equal(statSync(store.dir).mode & 0o777, 0o700, "only the user can enter the store (it can hold copies of .env files)");
   } finally {
     cleanup(root, base, outside);
   }
