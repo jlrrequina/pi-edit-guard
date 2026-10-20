@@ -1,0 +1,35 @@
+name: Bug report
+description: A wrong block, an /undo that did not restore exactly, a loop notice that misfired, or anything else broken
+labels: [bug]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Freshness (a write blocked or allowed wrongly)
+        - Snapshots and /undo
+        - Loop breaker (repeat block, failure notice)
+        - Commands (/guard, /checkpoints)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: "`/guard`, the block or notice text, or the relevant lines of `$TMPDIR/pi-edit-guard/debug.jsonl` (run π with `PI_EDIT_GUARD_DEBUG=1`). Remove anything private."
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "package 0.1.0 · π 1.3.0 · git 2.56 · macOS 26 · Node 24"
+    validations:
+      required: true

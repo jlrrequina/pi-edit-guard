@@ -1,0 +1,37 @@
+name: Public repositories
+
+# Snapshot, mutate and restore real repositories across ecosystems, and measure
+# the overhead: the restore must be exact and the project's own .git untouched.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "guard/**"
+      - "scripts/corpus.ts"
+      - ".github/workflows/corpus.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: corpus-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  corpus:
+    name: snapshot and restore real repositories
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Run on real repositories
+        run: node scripts/corpus.ts --dir "$RUNNER_TEMP/corpus" --summary "$GITHUB_STEP_SUMMARY"

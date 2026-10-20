@@ -1,0 +1,267 @@
+name: Release
+
+# Automatic. Every push to main runs CI (the reusable ci.yml), then:
+#   prepare  releases when "## Unreleased" in CHANGELOG.md has entries. The heading
+#            picks the version: "## Unreleased" is a patch release, "## Unreleased (minor)",
+#            "## Unreleased (major)" or "## Unreleased (X.Y.Z)" say otherwise. It moves the
+#            notes under the new version, bumps package.json, commits "release: X.Y.Z", tags
+#            vX.Y.Z, pushes both and starts this workflow on the tag. With nothing under
+#            "## Unreleased" a push only runs CI.
+#   publish  runs on the tag, so npm provenance points at exactly the tagged commit: tests
+#            again, packs once, attests the tarball, publishes it to npm and attaches the same
+#            bytes to the GitHub release with the provenance bundle (<tarball>.intoto.jsonl).
+# Manual: Actions → Release → Run workflow (from main) with patch | minor | major | X.Y.Z
+# overrides the heading; tick dry-run to rehearse without pushing. Pushing a vX.Y.Z tag
+# yourself runs publish directly. npm authentication is trusted publishing (OIDC) from the
+# "npm" environment: there is no npm token. Everything is safe to re-run: an existing tag is
+# not recreated, a published version is not republished, an existing release is left alone.
+on:
+  push:
+    branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: patch, minor, major or X.Y.Z (ignored when run on a tag)
+        required: true
+        default: patch
+      dry-run:
+        description: Prepare only — test and show the release without pushing
+        type: boolean
+        default: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash # -e -o pipefail
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: CI
+    if: github.ref == 'refs/heads/main'
+    # zizmor prefers GitHub's $/ form, but actionlint 1.7.12 rejects it (rhysd/actionlint#711).
+    # A job-level call has no earlier steps that could plant a workflow file, so ./ is safe here.
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  prepare:
+    name: prepare
+    needs: ci
+    if: github.repository == 'jlrrequina/pi-edit-guard' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # push the release commit and tag
+      actions: write # start the publish run on the tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Decide whether to release
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "::notice::main has moved past this commit; the run for the newer commit releases."
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          state="$(node scripts/changelog.ts pending)"
+          pending="$(sed -n 's/^pending=//p' <<< "$state")"
+          spec="$(sed -n 's/^spec=//p' <<< "$state")"
+          if [ "$EVENT" = "workflow_dispatch" ]; then spec="$INPUT_VERSION"
+          elif [ "$pending" != "true" ]; then
+            echo "Nothing under \"## Unreleased\" in CHANGELOG.md: no release." >> "$GITHUB_STEP_SUMMARY"
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          plan="$(node scripts/release.ts plan "$spec")"
+          echo "$plan"
+          echo "$plan" >> "$GITHUB_OUTPUT"
+
+      - name: Bump package.json and CHANGELOG.md, commit and tag
+        if: steps.plan.outputs.mode == 'new'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          if ! node scripts/changelog.ts release "$VERSION" "$(date -u +%F)"; then
+            echo "::error::Add the changes under \"## Unreleased\" in CHANGELOG.md first. To finish a release that failed after its tag was pushed, re-run that run or run this workflow with its exact version."
+            exit 1
+          fi
+          npm version "$VERSION" --no-git-tag-version --ignore-scripts
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json CHANGELOG.md
+          git commit --quiet -m "release: $VERSION"
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git show --stat --format="%h %s" HEAD
+          {
+            echo "## v$VERSION"
+            echo
+            node scripts/changelog.ts notes "$VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # CI passed on this commit; the release commit changes only the version and the notes.
+      - name: Install
+        if: steps.plan.outputs.mode == 'new'
+        run: npm ci --ignore-scripts
+      - name: Typecheck
+        if: steps.plan.outputs.mode == 'new'
+        run: npm run check
+      - name: Files that would be published
+        if: steps.plan.outputs.mode == 'new'
+        run: npm pack --dry-run
+
+      - name: Push the release commit and tag
+        if: steps.plan.outputs.mode == 'new' && !inputs.dry-run
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --atomic origin "HEAD:refs/heads/main" "refs/tags/v$VERSION"
+
+      - name: Start publishing the tag
+        if: (steps.plan.outputs.mode == 'new' || steps.plan.outputs.mode == 'resume') && !inputs.dry-run
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          MODE: ${{ steps.plan.outputs.mode }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION"
+          if [ "$MODE" = "resume" ]; then echo "v$VERSION was already tagged: publishing it."; fi
+          echo "Publishing v$VERSION → $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/release.yml" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: publish
+    if: github.repository == 'jlrrequina/pi-edit-guard' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@lenard9191/pi-edit-guard
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # npm trusted publishing and provenance, tarball attestation
+      attestations: write # store the tarball attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Check the tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          name="$(node -p "require('./package.json').name")"
+          if [ "$(node -p "require('./package.json').version")" != "$version" ]; then echo "::error::package.json is not at version $version"; exit 1; fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then echo "::error::$TAG is not on main: push main first"; exit 1; fi
+          if ! node scripts/release.ts at-least "$(npm --version)" 11.5.1; then echo "::error::npm $(npm --version) is too old for trusted publishing (needs 11.5.1)"; exit 1; fi
+          node scripts/changelog.ts notes "$version" > "$RUNNER_TEMP/notes.md"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Install
+        run: npm ci --ignore-scripts
+      - name: Typecheck
+        run: npm run check
+      - name: Test
+        run: npm test
+
+      - name: Pack
+        id: pack
+        run: |
+          file="$(npm pack --json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8"))[0].filename')"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          sha256sum "$file"
+      - name: Smoke-test the tarball
+        env:
+          FILE: ${{ steps.pack.outputs.file }}
+        run: |
+          mkdir "$RUNNER_TEMP/smoke"
+          tar -xzf "$FILE" -C "$RUNNER_TEMP/smoke"
+          # π provides its own packages to extensions at runtime; the dev dependencies stand in for it
+          ln -s "$PWD/node_modules" "$RUNNER_TEMP/smoke/node_modules"
+          node test/smoke.ts "$RUNNER_TEMP/smoke/package"
+      - name: Attest the tarball
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.pack.outputs.file }}
+      - name: Provenance file for the release
+        # The Sigstore bundle written by actions/attest carries the SLSA v1 in-toto statement,
+        # its signature, the signing certificate and the transparency-log entry, so it verifies
+        # without GitHub's attestation store. Attached as <tarball>.intoto.jsonl, the form that
+        # `gh attestation download` produces and `gh attestation verify --bundle` reads.
+        env:
+          FILE: ${{ steps.pack.outputs.file }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jq -c . "$BUNDLE" > "$FILE.intoto.jsonl"
+          gh attestation verify "$FILE" --bundle "$FILE.intoto.jsonl" --repo "$GITHUB_REPOSITORY"
+
+      - name: Publish to npm
+        env:
+          NAME: ${{ steps.tag.outputs.name }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          FILE: ${{ steps.pack.outputs.file }}
+        run: |
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm"
+          else
+            npm publish "./$FILE" --provenance --access public
+          fi
+
+      - name: GitHub release
+        env:
+          TAG: ${{ github.ref_name }}
+          FILE: ${{ steps.pack.outputs.file }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG already exists"
+          else
+            # releases are immutable: every asset has to be attached here
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag "$FILE" "$FILE.intoto.jsonl"
+          fi
+
+      - name: Summary
+        env:
+          NAME: ${{ steps.tag.outputs.name }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo "## $NAME@$VERSION"
+            echo
+            echo "- npm: https://www.npmjs.com/package/$NAME/v/$VERSION (provenance at the bottom of the page)"
+            echo "- GitHub release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+            echo "- verify the tarball: \`gh attestation verify <tarball> -R $GITHUB_REPOSITORY\` (offline: add \`--bundle <tarball>.intoto.jsonl\`)"
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+          } >> "$GITHUB_STEP_SUMMARY"

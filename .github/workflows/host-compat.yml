@@ -1,0 +1,35 @@
+name: Host compatibility
+
+# π ships often; the pinned devDependencies lag behind what users run. Typecheck
+# and test against the latest release, including the test that pins the guard's
+# copy of π's path resolution, so an upstream change shows up here first without
+# turning pull requests red for upstream reasons.
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-pi:
+    name: typecheck and test against the latest π release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Replace the pinned π packages with the latest release
+        # installing whatever is newest, outside the lockfile, is the purpose of this job
+        run: | # zizmor: ignore[adhoc-packages]
+          npm install --no-save --ignore-scripts @earendil-works/pi-ai@latest @earendil-works/pi-coding-agent@latest
+          echo "π $(node -p 'JSON.parse(require("fs").readFileSync("node_modules/@earendil-works/pi-coding-agent/package.json", "utf8")).version')" >> "$GITHUB_STEP_SUMMARY"
+      - run: npm run check
+      - run: npm test
