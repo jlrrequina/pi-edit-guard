@@ -64,7 +64,7 @@ test("a run: read→edit allowed, stale or unread writes blocked, one run ref in
   }
 });
 
-test("/undo: preview and scripted confirm, pre-undo checkpoint, cancel changes nothing, /undo pre-undo-1 reverses, no UI needs --yes", async () => {
+test("/undo: preview and scripted confirm, pre-undo checkpoint, cancel changes nothing, /undo pre-undo-1 reverses, no UI needs --yes, a run that does not exist is named", async () => {
   const p = project();
   try {
     const h = new Harness(p.root);
@@ -78,6 +78,7 @@ test("/undo: preview and scripted confirm, pre-undo checkpoint, cancel changes n
     });
     const afterRun = readTree(p.root);
 
+    assert.match(await h.command("undo", "2"), /^edit-guard: run 2 does not exist; the latest run of this session is run 1\.$/);
     h.confirmAnswer = false;
     assert.match(await h.command("undo"), /undo cancelled; nothing changed/);
     assert.equal(h.confirms.length, 1);
