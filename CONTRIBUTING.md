@@ -3,7 +3,7 @@
 Issues and pull requests are welcome.
 
 - Read [AGENTS.md](AGENTS.md): the hard constraints (erasable TypeScript only, no runtime dependencies, never write into the project or its `.git`, the failure direction of each invariant).
-- `npm install`, then `npm run check` and `npm test` must pass. CI runs them on Linux and macOS with Node 22.18, 24 and 26, against the oldest supported π (1.2.0), smoke-tests the packed tarball and enforces a coverage floor.
+- `npm install`, then `npm run check` and `npm test` must pass. CI runs them on Linux, macOS and Windows with Node 22.18, 24 and 26, against the oldest supported π (1.2.0), smoke-tests the packed tarball and enforces a coverage floor.
 - A change to `guard/snapshot.ts` needs the property test to pass (`npm test` runs 300 cases; `PEG_PROPERTY_RUNS=2000 node --test test/snapshot.property.test.ts` runs more) and `npm run corpus` on real repositories (CI runs it for such pull requests and weekly).
 - A change to how the guard reads π (events, entries, paths) needs a test in `test/host.test.ts`, which runs inside a real π session, and one live run: `PI_EDIT_GUARD_E2E_MODEL=anthropic/claude-haiku-4-5 npm run e2e`.
 - Add a line under `## Unreleased` in `CHANGELOG.md` for every user-visible change.
@@ -28,7 +28,7 @@ npm cannot publish the first version of a package through trusted publishing ([n
 1. Create the repository `jlrrequina/pi-edit-guard` and, under **Settings → Environments**, an environment `npm` that only `main` and `v*` tags can deploy from.
 2. Push `main`. The Release workflow tags `v0.1.0` from `## Unreleased (0.1.0)`; its **publish** run fails at "Publish to npm", because the package does not exist yet.
 3. Publish that tag by hand, from a clean checkout: `git checkout v0.1.0 && npm ci && npm publish --access public`.
-4. On npmjs.com, under the package's **Settings → Trusted Publisher**, add GitHub Actions: user `jlrrequina`, repository `pi-edit-guard`, workflow `release.yml`, environment `npm`. Then require two-factor authentication and disallow tokens for publishing.
+4. Connect the package to the workflow (npm 11.15 or later, two-factor authentication on): `npm trust github @lenard9191/pi-edit-guard --file release.yml --repo jlrrequina/pi-edit-guard --env npm --allow-publish`. With an older npm, do the same on npmjs.com under the package's **Settings → Trusted Publisher**. Then, in the package's settings, require two-factor authentication and disallow tokens for publishing.
 5. Re-run the failed **publish** run: it skips npm (the version exists) and creates the GitHub release.
 
 A new trusted-publisher configuration expires if no publish succeeds within 2 days, so add it in step 4 shortly before the next release, or re-create it then.

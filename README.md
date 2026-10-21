@@ -36,7 +36,9 @@ edit-guard: this command failed 2 times after changes. Stop. Re-read the relevan
 
 An observation lasts while the tool result that delivered it is in the model's context. Each one is stored in the session (`edit-guard/observation` entries) and rebuilt from π's own projection of the branch on resume, fork, `/tree`, compaction and context edits: a read that compaction summarized, or that an extension pruned, must be repeated; a read that compaction kept verbatim stays valid. Changes made by you, another agent or a formatter are caught by the hash.
 
-**Snapshots.** Each project root (the git top level, or the working directory outside git) has a private git object store under `~/.pi/agent/pi-edit-guard/stores/`, with its own persistent index, so after the first snapshot only changed files are hashed. The project's `.git` is only read (`rev-parse`, `ls-files`), never written. The first call of a run that can change files (anything except `read`, `grep`, `find`, `ls` and the other read-only tools; unknown tools count as changing) records the tree as `refs/runs/<session>/<n>`. What the tree holds is git's view of the root: tracked and untracked files that are not ignored, plus files your project tracks although an ignore rule matches them. Content is stored byte for byte: the project's `.gitattributes` (line endings, LFS and other filters) do not apply.
+**Snapshots.** Each project root (the git top level, or the working directory outside git) has a private git object store under `~/.pi/agent/pi-edit-guard/stores/`, with its own persistent index, so after the first snapshot only changed files are hashed. The project's `.git` is only read (`rev-parse`, `ls-files`), never written. The first call of a run that can change files (anything except `read`, `grep`, `find`, `ls` and the other read-only tools; unknown tools count as changing) records the tree as `refs/runs/<session>/<n>`. What the tree holds is git's view of the root: tracked and untracked files that are not ignored, plus files your project tracks although an ignore rule matches them. Content is stored byte for byte: the project's `.gitattributes` (line endings, LFS and other filters) do not apply. Names keep their case, also where the file system ignores case (Windows, macOS): a file renamed from `Foo.ts` to `foo.ts` comes back as `Foo.ts`.
+
+The first snapshot of a root writes every file into the store, which takes seconds on a large project. It starts in the background with the session's first prompt, while the model works, so the snapshot before the run's first change only adds what changed since.
 
 Files a write tool changes that the snapshot does not hold (an ignored `.env`, a file outside the root) are copied to a journal before the first write of the run. `/undo` restores the snapshot and the journal together.
 
@@ -59,7 +61,7 @@ Files a write tool changes that the snapshot does not hold (an ignored `.env`, a
 
 ## Coverage
 
-Restored exactly by `/undo`: content, executable bit and symlink targets of every file in the snapshot; files a write tool changed outside it (ignored files, files outside the root); files created during the run are deleted, and directories left empty are removed.
+Restored exactly by `/undo`: content, executable bit, symlink targets and the case of the names of every file in the snapshot; files a write tool changed outside it (ignored files, files outside the root); files created during the run are deleted, and directories left empty are removed.
 
 Never covered, by design:
 
@@ -67,6 +69,8 @@ Never covered, by design:
 - the content of nested git repositories and submodules;
 - empty directories, and permission bits other than the executable bit of a file that has to be recreated;
 - files git cannot read.
+
+On Windows, files have no executable bit, and a symlink can be restored only with Developer Mode on or with administrator rights; without them, the `/undo` preview names the symlinks it cannot restore before you confirm.
 
 A run whose snapshot failed cannot be undone; `/undo` says so and names the run before it. No snapshots are taken in the home directory, at a file-system root, or in a directory outside git with more than 20,000 files or 500 MB.
 
@@ -92,7 +96,7 @@ Outside git, the store also ignores `.git`, `node_modules`, `.pnpm-store`, `dist
 
 ## Secrets
 
-A snapshot or journal can contain secrets: an ignored `.env` that the agent wrote is copied to the journal so `/undo` can restore it. These copies exist only under `~/.pi/agent/pi-edit-guard/`, in directories only you can read (mode 0700); the extension never sends them anywhere and never pushes the store. Old runs are deleted after `keepRuns` runs, and whole stores after `storeMaxAgeDays`. Delete `~/.pi/agent/pi-edit-guard/stores/` at any time to remove them all.
+A snapshot or journal can contain secrets: an ignored `.env` that the agent wrote is copied to the journal so `/undo` can restore it. These copies exist only under `~/.pi/agent/pi-edit-guard/`, in directories only you can read (mode 0700 on macOS and Linux; on Windows, the permissions of your user profile); the extension never sends them anywhere and never pushes the store. Old runs are deleted after `keepRuns` runs, and whole stores after `storeMaxAgeDays`. Delete `~/.pi/agent/pi-edit-guard/stores/` at any time to remove them all.
 
 ## Decided out
 
@@ -110,24 +114,24 @@ Measured with `npm run corpus` on an Apple M3 Pro (macOS 27, Node 24, git 2.56).
 
 | target | language | files | first snapshot | second snapshot | restore (paths) | freshness check | store | exact | .git untouched |
 |---|---|--:|--:|--:|--:|--:|--:|:-:|:-:|
-| express | JavaScript | 214 | 114 ms | 42 ms | 208 ms (103) | 0.12 ms | 0.8 MB | yes | yes |
-| flask | Python | 236 | 146 ms | 79 ms | 235 ms (103) | 0.12 ms | 1.7 MB | yes | yes |
-| ripgrep | Rust | 237 | 173 ms | 85 ms | 233 ms (103) | 0.12 ms | 1.4 MB | yes | yes |
-| cobra | Go | 66 | 72 ms | 59 ms | 156 ms (78) | 0.12 ms | 0.6 MB | yes | yes |
-| git | C | 4,856 | 1,925 ms | 94 ms | 302 ms (103) | 0.11 ms | 15.5 MB | yes | yes |
-| rails | Ruby | 5,022 | 2,101 ms | 135 ms | 527 ms (103) | 0.15 ms | 21.4 MB | yes | yes |
-| django | Python | 7,089 | 4,713 ms | 270 ms | 792 ms (103) | 0.19 ms | 28.5 MB | yes | yes |
-| react | JavaScript | 7,260 | 2,470 ms | 162 ms | 513 ms (103) | 0.15 ms | 16.4 MB | yes | yes |
-| symfony | PHP | 16,361 | 6,796 ms | 359 ms | 1,037 ms (103) | 0.17 ms | 36.5 MB | yes | yes |
-| flask without `.git` | Python | 236 | 187 ms | 125 ms | 320 ms (103) | 0.13 ms | 1.4 MB | yes | n/a |
-| generated, git | - | 10,000 | 3,259 ms | 200 ms | 971 ms (102) | 0.29 ms | 6.8 MB | yes | yes |
-| generated, no git | - | 10,000 | 1,760 ms | 123 ms | 503 ms (103) | 0.13 ms | 6.8 MB | yes | n/a |
+| express | JavaScript | 214 | 130 ms | 50 ms | 253 ms (103) | 0.14 ms | 0.8 MB | yes | yes |
+| flask | Python | 236 | 158 ms | 114 ms | 290 ms (103) | 0.13 ms | 1.7 MB | yes | yes |
+| ripgrep | Rust | 237 | 187 ms | 140 ms | 301 ms (103) | 0.12 ms | 1.4 MB | yes | yes |
+| cobra | Go | 66 | 80 ms | 70 ms | 175 ms (78) | 0.13 ms | 0.6 MB | yes | yes |
+| git | C | 4,856 | 1,958 ms | 104 ms | 371 ms (103) | 0.11 ms | 15.5 MB | yes | yes |
+| rails | Ruby | 5,022 | 2,188 ms | 134 ms | 461 ms (103) | 0.11 ms | 21.4 MB | yes | yes |
+| django | Python | 7,089 | 3,702 ms | 233 ms | 695 ms (103) | 0.12 ms | 27.7 MB | yes | yes |
+| react | JavaScript | 7,260 | 2,035 ms | 145 ms | 518 ms (103) | 0.12 ms | 16.8 MB | yes | yes |
+| symfony | PHP | 16,364 | 5,525 ms | 294 ms | 847 ms (103) | 0.13 ms | 36.6 MB | yes | yes |
+| flask without `.git` | Python | 236 | 158 ms | 112 ms | 277 ms (103) | 0.11 ms | 1.4 MB | yes | n/a |
+| generated, git | - | 10,000 | 1,582 ms | 133 ms | 502 ms (102) | 0.11 ms | 6.8 MB | yes | yes |
+| generated, no git | - | 10,000 | 1,479 ms | 99 ms | 409 ms (103) | 0.12 ms | 6.8 MB | yes | n/a |
 
-In isolation (median of 3), the 10,000-file trees take 1.9 s for the first snapshot and 110-130 ms for the next. Most of a first snapshot is writing one git tree object per directory (django: 3,270 directories, 2.4 s).
+Most of a first snapshot is writing one git tree object per directory (django has 3,270). The first snapshot runs in the background from the session's first prompt, so a run waits for it only when it changes something before the snapshot is done.
 
 ## Compatibility
 
-π 1.2.0 or later (tested with 1.2.0 and 1.3.0), Node 22.18 or later, and `git` on the `PATH`. Tested on macOS and Linux. Windows is not supported yet: snapshots rely on POSIX file modes and symlinks, and no Windows test has run.
+π 1.2.0 or later (tested with 1.2.0 and 1.3.0), Node 22.18 or later, and `git`. macOS, Linux and Windows; CI runs every test on all three. On Windows, π needs Git for Windows for its bash tool, and the guard uses the `git.exe` of that installation when `git` is not on the `PATH`.
 
 ## Development
 
