@@ -115,18 +115,18 @@ Measured with `npm run corpus` on an Apple M3 Pro (macOS 27, Node 24, git 2.56).
 
 | target | language | files | first snapshot | second snapshot | restore (paths) | freshness check | store | exact | .git untouched |
 |---|---|--:|--:|--:|--:|--:|--:|:-:|:-:|
-| express | JavaScript | 214 | 130 ms | 50 ms | 253 ms (103) | 0.14 ms | 0.8 MB | yes | yes |
-| flask | Python | 236 | 158 ms | 114 ms | 290 ms (103) | 0.13 ms | 1.7 MB | yes | yes |
-| ripgrep | Rust | 237 | 187 ms | 140 ms | 301 ms (103) | 0.12 ms | 1.4 MB | yes | yes |
-| cobra | Go | 66 | 80 ms | 70 ms | 175 ms (78) | 0.13 ms | 0.6 MB | yes | yes |
-| git | C | 4,856 | 1,958 ms | 104 ms | 371 ms (103) | 0.11 ms | 15.5 MB | yes | yes |
-| rails | Ruby | 5,022 | 2,188 ms | 134 ms | 461 ms (103) | 0.11 ms | 21.4 MB | yes | yes |
-| django | Python | 7,089 | 3,702 ms | 233 ms | 695 ms (103) | 0.12 ms | 27.7 MB | yes | yes |
-| react | JavaScript | 7,260 | 2,035 ms | 145 ms | 518 ms (103) | 0.12 ms | 16.8 MB | yes | yes |
-| symfony | PHP | 16,364 | 5,525 ms | 294 ms | 847 ms (103) | 0.13 ms | 36.6 MB | yes | yes |
-| flask without `.git` | Python | 236 | 158 ms | 112 ms | 277 ms (103) | 0.11 ms | 1.4 MB | yes | n/a |
-| generated, git | - | 10,000 | 1,582 ms | 133 ms | 502 ms (102) | 0.11 ms | 6.8 MB | yes | yes |
-| generated, no git | - | 10,000 | 1,479 ms | 99 ms | 409 ms (103) | 0.12 ms | 6.8 MB | yes | n/a |
+| express | JavaScript | 214 | 127 ms | 61 ms | 235 ms (103) | 0.13 ms | 0.8 MB | yes | yes |
+| flask | Python | 236 | 158 ms | 87 ms | 258 ms (103) | 0.13 ms | 1.7 MB | yes | yes |
+| ripgrep | Rust | 237 | 186 ms | 93 ms | 258 ms (103) | 0.11 ms | 1.4 MB | yes | yes |
+| cobra | Go | 66 | 83 ms | 72 ms | 173 ms (78) | 0.11 ms | 0.6 MB | yes | yes |
+| git | C | 4,856 | 1,968 ms | 107 ms | 369 ms (103) | 0.11 ms | 15.5 MB | yes | yes |
+| rails | Ruby | 5,022 | 2,206 ms | 134 ms | 452 ms (103) | 0.10 ms | 21.4 MB | yes | yes |
+| django | Python | 7,089 | 3,761 ms | 232 ms | 672 ms (103) | 0.11 ms | 27.6 MB | yes | yes |
+| react | JavaScript | 7,260 | 2,069 ms | 155 ms | 524 ms (103) | 0.13 ms | 16.9 MB | yes | yes |
+| symfony | PHP | 16,364 | 5,553 ms | 316 ms | 875 ms (103) | 0.11 ms | 36.6 MB | yes | yes |
+| flask without `.git` | Python | 236 | 158 ms | 110 ms | 260 ms (103) | 0.11 ms | 1.4 MB | yes | n/a |
+| generated, git | - | 10,000 | 1,586 ms | 143 ms | 531 ms (102) | 0.10 ms | 6.8 MB | yes | yes |
+| generated, no git | - | 10,000 | 1,507 ms | 106 ms | 407 ms (103) | 0.11 ms | 6.8 MB | yes | n/a |
 
 Most of a first snapshot is writing one git tree object per directory (django has 3,270). The first snapshot runs in the background from the session's first prompt, so a run waits for it only when it changes something before the snapshot is done.
 
