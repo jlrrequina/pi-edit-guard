@@ -551,7 +551,7 @@ export default function piEditGuard(pi: ExtensionAPI): void {
           lines.push(r.covered ? `run ${r.n}: covered (${refName(session, { kind: "run", n: r.n })})${journaled}` : `run ${r.n}: not covered (${r.reason ?? "unknown"})`);
           if (r.unreadable.length) lines.push(`  ${r.unreadable.length} paths git could not read are not covered: ${r.unreadable.slice(0, 5).join(", ")}`);
         } else lines.push("no run of this session has changed anything yet");
-        lines.push(`never covered: changes made by shell commands outside ${store.root}, nested git repositories, empty directories`);
+        lines.push(`never covered: changes made by shell commands outside ${store.root}, nested git repositories, directories behind a link (Windows junctions), empty directories`);
       } catch (err) {
         lines.push(`snapshots unavailable: ${message(err)}`);
       }

@@ -304,6 +304,7 @@ export type TreeResult = { tree: string; unreadable: string[] };
 /** Stage the root in the private index and write its tree. Paths git cannot read are skipped and reported. */
 export async function snapshotTree(store: Store): Promise<TreeResult> {
   return withLockRetry(store, async () => {
+    const links = await linkedDirectories(store);
     const add = await runGit(store, ["add", "-A", "--ignore-errors"], { ok: [0, 1] });
     const unreadable = [...add.stderr.matchAll(/^error: unable to index file '(.*)'$/gm)].map((m) => m[1]!);
     if (add.code === 1 && unreadable.length === 0) throw new GitError("add", add);
@@ -313,10 +314,67 @@ export async function snapshotTree(store: Store): Promise<TreeResult> {
       const tracked = await projectGit(store.root, ["ls-files", "-z", "-c", "-i", "--exclude-standard"]);
       if (tracked.stdout.length) await runGit(store, ["--literal-pathspecs", "add", "-f", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"], { input: tracked.stdout, ok: [0, 1] });
     }
-    await dropCaseGhosts(store);
+    const names = (await runGit(store, ["ls-files", "-z"])).stdout.toString("utf8").split("\0").filter(Boolean);
+    await dropCaseGhosts(store, names);
+    await dropFollowedLinks(store, names, links);
     const tree = text((await runGit(store, ["write-tree"])).stdout);
     return { tree, unreadable };
   });
+}
+
+// Git for Windows follows a directory junction as if it were a directory: the files behind it, often
+// outside the project, would enter the snapshot, an unbounded domain. Git elsewhere records a link and
+// never follows it. So a directory reached through a link stays out, like a nested repository: git's
+// walk excludes it, and entries found under it are dropped. A write tool's edit through it resolves
+// outside the domain and is journaled.
+
+const LINKS_MARK = "# pi-edit-guard: linked directories (Windows junctions), not followed";
+const linksFile = (store: Store) => join(store.dir, "linked-directories.json");
+/** Directories found to be real directories, per store, in this process: checked once. */
+const realDirectories = new Map<string, Set<string>>();
+
+/** The linked directories recorded for the store that are still links; the exclude file follows. */
+export async function linkedDirectories(store: Store): Promise<string[]> {
+  const recorded = await readFile(linksFile(store), "utf8").then((t) => JSON.parse(t) as string[], () => [] as string[]);
+  const still: string[] = [];
+  for (const rel of recorded) if ((await lstat(join(store.root, ...rel.split("/"))).catch(() => undefined))?.isSymbolicLink()) still.push(rel);
+  await saveLinkedDirectories(store, still);
+  return still;
+}
+
+async function saveLinkedDirectories(store: Store, links: readonly string[]): Promise<void> {
+  const json = JSON.stringify(links);
+  if (json !== (readFileIfExists(linksFile(store)) || "[]")) await writeFile(linksFile(store), json);
+  const path = join(store.dir, "info", "exclude");
+  const current = readFileIfExists(path);
+  let base = current.split(`${LINKS_MARK}\n`)[0]!;
+  if (base && !base.endsWith("\n")) base += "\n";
+  const pattern = (rel: string) => `/${rel.replace(/[\\*?[\]]/g, "\\$&").replace(/ $/, "\\ ")}/`;
+  const next = base + (links.length ? `${LINKS_MARK}\n${links.map(pattern).join("\n")}\n` : "");
+  if (next !== current) await writeFile(path, next);
+}
+
+export async function dropFollowedLinks(store: Store, names: readonly string[], known: readonly string[]): Promise<void> {
+  let real = realDirectories.get(store.dir);
+  if (!real) realDirectories.set(store.dir, (real = new Set()));
+  const found: string[] = [];
+  for (const rel of names) {
+    const parts = rel.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      const dir = parts.slice(0, i).join("/");
+      if (real.has(dir)) continue;
+      if (found.includes(dir)) break;
+      if ((await lstat(join(store.root, ...parts.slice(0, i))).catch(() => undefined))?.isSymbolicLink()) {
+        found.push(dir);
+        break;
+      }
+      real.add(dir);
+    }
+  }
+  if (!found.length) return;
+  const under = names.filter((rel) => found.some((dir) => rel.startsWith(`${dir}/`)));
+  await runGit(store, ["update-index", "-z", "--force-remove", "--stdin"], { input: under.join("\0") });
+  await saveLinkedDirectories(store, [...new Set([...known, ...found])].sort());
 }
 
 /** Names that a case-insensitive file system (Windows, macOS by default) treats as one. */
@@ -327,10 +385,9 @@ const foldName = (name: string) => name.normalize("NFC").toLowerCase();
  * finds the file under its old spelling, so the private index holds both. Keep the spelling the
  * directory lists: the tree records names as they are, and a restore can bring the case back.
  */
-async function dropCaseGhosts(store: Store): Promise<void> {
+async function dropCaseGhosts(store: Store, names: readonly string[]): Promise<void> {
   const groups = new Map<string, string[]>();
-  for (const rel of (await runGit(store, ["ls-files", "-z"])).stdout.toString("utf8").split("\0")) {
-    if (!rel) continue;
+  for (const rel of names) {
     const group = groups.get(foldName(rel));
     if (group) group.push(rel);
     else groups.set(foldName(rel), [rel]);
@@ -494,9 +551,8 @@ const WINDOWS_SYMLINKS = "Windows creates symlinks only with Developer Mode on o
 
 let symlinkProbe: Promise<boolean> | undefined;
 
-/** Whether this process can create symlinks: always outside Windows; on Windows, measured once. */
+/** Whether this process can create symlinks (Windows needs a privilege for it), measured once. */
 function canSymlink(dir: string): Promise<boolean> {
-  if (!windows) return Promise.resolve(true);
   return (symlinkProbe ??= (async () => {
     const probe = join(dir, `symlink-probe-${randomBytes(4).toString("hex")}`);
     try {

@@ -67,6 +67,7 @@ Never covered, by design:
 
 - changes made by shell commands outside the root, and by shell commands to files the snapshot does not hold (ignored files);
 - the content of nested git repositories and submodules;
+- what is behind a directory junction on Windows (git would follow it out of the project): the junction and its content stay out of the snapshot, and a write tool's edits through it are journaled;
 - empty directories, and permission bits other than the executable bit of a file that has to be recreated;
 - files git cannot read.
 

@@ -3,11 +3,19 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, describePlan, gitExecutable, retain, retryLocked, runGit, refuseRoot, safeSession, sweepStores, storeDir } from "../guard/snapshot.ts";
+import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, describePlan, dropFollowedLinks, gitExecutable, linkedDirectories, retain, retryLocked, runGit, refuseRoot, safeSession, sweepStores, storeDir } from "../guard/snapshot.ts";
 import type { Checkpoint, CheckpointId, Store } from "../guard/snapshot.ts";
 import { cleanup, initRepo, projectGitState, readTree, sameTree, tempDir, writeFile, writeLink } from "./helpers.ts";
 
 const SESSION = "s1";
+
+const caseSensitive = (() => {
+  const d = tempDir();
+  writeFileSync(join(d, "a"), "");
+  const sensitive = !existsSync(join(d, "A"));
+  cleanup(d);
+  return sensitive;
+})();
 
 async function setup(gitRoot: boolean) {
   const root = tempDir("peg-root-");
@@ -165,6 +173,23 @@ for (const gitRoot of [true, false]) {
       await undo(store, preUndo, 2, 1);
       assert.deepEqual(readdirSync(root).filter((n) => /^(src|bin)$/i.test(n)).sort(), ["Bin", "src"]);
       assert.deepEqual(readdirSync(join(root, "src")).sort(), ["A.ts", "b.ts"]);
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
+  test(`${kind}: where case matters, two names that differ only in case are two files, and both stay`, { skip: !caseSensitive }, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      writeFile(root, "docs/README.md", "upper\n");
+      writeFile(root, "docs/readme.md", "lower\n");
+      const before = readTree(root);
+      const run1 = await runWith(store, 1, () => {
+        writeFile(root, "docs/readme.md", "changed\n");
+        unlinkSync(join(root, "docs/README.md"));
+      });
+      await undo(store, run1, 1, 1);
+      assert.equal(sameTree(before, readTree(root)), undefined);
     } finally {
       cleanup(root, base, outside);
     }
@@ -360,17 +385,46 @@ test("the restore preview says when this system cannot create the plan's symlink
   assert.doesNotMatch(describePlan(store, { ...plan, unsupportedLinks: 0 }), /cannot be restored/);
 });
 
-test("windows: a junction is recorded as a link, never followed, and restores", { skip: process.platform !== "win32" }, async () => {
+test("a directory git reached through a link (Git for Windows follows junctions) is dropped and excluded, until a real directory takes its place", async () => {
+  const { root, base, outside, store } = await setup(false);
+  try {
+    writeFile(outside, "shared/data.txt", "behind the link\n");
+    symlinkSync(join(outside, "shared"), join(root, "shared"), "junction"); // a directory symlink outside Windows
+    // what Git for Windows does with a junction: it stages the files behind it
+    const oid = (await runGit(store, ["hash-object", "-w", "--stdin"], { input: "behind the link\n" })).stdout.toString().trim();
+    await runGit(store, ["update-index", "--add", "--cacheinfo", `100644,${oid},shared/data.txt`]);
+    await dropFollowedLinks(store, ["shared/data.txt", "src/a.ts"], []);
+    assert.ok(!(await runGit(store, ["ls-files"])).stdout.toString().includes("shared/"), "the entries behind the link are dropped");
+    const exclude = () => readFileSync(join(store.dir, "info", "exclude"), "utf8");
+    assert.match(exclude(), /\n\/shared\/\n$/, "git's walk no longer enters it");
+    assert.deepEqual(await linkedDirectories(store), ["shared"], "a link that is still a link stays out");
+    unlinkSync(join(root, "shared"));
+    writeFile(root, "shared/real.txt", "a real directory now\n");
+    assert.deepEqual(await linkedDirectories(store), []);
+    assert.doesNotMatch(exclude(), /shared/, "a real directory in its place is in the domain again");
+  } finally {
+    cleanup(root, base, outside);
+  }
+});
+
+test("windows: git does not follow a junction into the snapshot; an edit through it is journaled and undone; a directory in its place is snapshotted again", { skip: process.platform !== "win32" }, async () => {
   const { root, base, outside, store } = await setup(true);
   try {
     writeFile(outside, "shared/data.txt", "outside the root\n");
     symlinkSync(join(outside, "shared"), join(root, "shared"), "junction");
-    const run1 = await runWith(store, 1, () => rmSync(join(root, "shared")));
-    const tree = (await runGit(store, ["ls-tree", "-r", "--name-only", run1.commit!])).stdout.toString();
-    assert.ok(!tree.includes("shared/data.txt"), "the files behind a junction are not in the snapshot");
+    const names = async (commit: string) => (await runGit(store, ["ls-tree", "-r", "--name-only", commit])).stdout.toString();
+    const run1 = await runWith(store, 1, async (write) => {
+      await write(join(root, "shared", "data.txt"));
+      writeFile(root, "shared/data.txt", "changed through the junction\n");
+    });
+    assert.ok(!(await names(run1.commit!)).includes("shared/"), "nothing behind the junction is in the snapshot");
     await undo(store, run1, 1, 1);
-    assert.ok(lstatSync(join(root, "shared")).isSymbolicLink());
-    assert.deepEqual(readdirSync(join(root, "shared")), ["data.txt"]);
+    assert.equal(readFileSync(join(outside, "shared", "data.txt"), "utf8"), "outside the root\n", "the journal undid the edit behind the junction");
+    assert.ok(lstatSync(join(root, "shared")).isSymbolicLink(), "the junction is still a junction");
+    unlinkSync(join(root, "shared"));
+    writeFile(root, "shared/real.txt", "a real directory now\n");
+    const run2 = await runWith(store, 2, () => {});
+    assert.ok((await names(run2.commit!)).includes("shared/real.txt"), "a real directory in its place is snapshotted");
   } finally {
     cleanup(root, base, outside);
   }
