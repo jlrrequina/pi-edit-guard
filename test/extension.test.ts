@@ -430,7 +430,7 @@ test("/guard toggles and status, /checkpoints, config errors, and the debug log"
     });
     const status = await h.command("guard", "status");
     assert.match(status, /^edit-guard: freshness off · snapshots off · loop off \(repeat limit 3\)/);
-    assert.match(status, new RegExp(`root: ${p.root} \\(git work tree\\)`));
+    assert.ok(status.includes(`root: ${p.root} (git work tree)`), status);
     assert.match(status, /run 1: covered \(refs\/runs\/.*\/1\)/);
     assert.match(status, /never covered: changes made by shell commands outside/);
     assert.match(await h.command("guard", "loop sideways"), /usage: \/guard/);
