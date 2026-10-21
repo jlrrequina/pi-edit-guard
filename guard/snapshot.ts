@@ -22,7 +22,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, rmdir, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, parse as parsePath, resolve, sep } from "node:path";
+import { basename, dirname, join, parse as parsePath, resolve, sep, win32 } from "node:path";
 import { DEFAULT_EXCLUDES } from "../config.ts";
 import { insideRoot } from "./paths.ts";
 
@@ -54,6 +54,9 @@ const STORE_CONFIG = [
   ["core.symlinks", "true"],
   ["core.fileMode", "true"],
   ["core.longpaths", "true"],
+  // On a case-insensitive file system git would keep a renamed file's old case (Foo.ts for foo.ts);
+  // with this off it stages both spellings, and dropCaseGhosts keeps the one on disk.
+  ["core.ignoreCase", "false"],
   // Stream every blob into a pack instead of one loose file per object: measured 2-4x faster first
   // snapshots and up to 7x smaller stores (10,000-file tree: 6.6 s → 1.5 s, 45 MB → 6.3 MB).
   ["core.bigFileThreshold", "1"],
@@ -77,9 +80,49 @@ function gitEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   return { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C", ...extra };
 }
 
+/**
+ * The git executable. π needs Git for Windows for its bash tool, but the installer's "Git Bash
+ * only" choice leaves git off the PATH: then use the git.exe of that installation.
+ */
+export function gitExecutable(platform: string = process.platform, env: NodeJS.ProcessEnv = process.env, exists: (path: string) => boolean = existsSync): string {
+  if (platform !== "win32") return "git";
+  const path = env.PATH ?? env.Path ?? "";
+  if (path.split(";").some((d) => d && exists(win32.join(d, "git.exe")))) return "git";
+  for (const base of [env.ProgramFiles, env["ProgramFiles(x86)"], env.LOCALAPPDATA && win32.join(env.LOCALAPPDATA, "Programs")]) {
+    for (const sub of ["cmd", "bin"]) {
+      const candidate = base && win32.join(base, "Git", sub, "git.exe");
+      if (candidate && exists(candidate)) return candidate;
+    }
+  }
+  return "git";
+}
+
+let git: string | undefined;
+
+const windows = process.platform === "win32";
+
+/** Recursive deletes. Windows refuses to delete a file another process holds open for a moment; rm retries those. */
+const RM = { recursive: true, force: true, maxRetries: windows ? 5 : 0 } as const;
+
+/**
+ * Windows refuses to rename or delete a file that another process holds open, such as a virus
+ * scanner or a search indexer reading a file that was just written: retry for up to about 3 s.
+ */
+export async function retryLocked<T>(fn: () => Promise<T>, platform: string = process.platform): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (platform !== "win32" || attempt >= 7 || (code !== "EBUSY" && code !== "EPERM" && code !== "EACCES")) throw err;
+      await sleep(25 * 2 ** attempt);
+    }
+  }
+}
+
 function spawnGit(args: readonly string[], cwd: string, env: NodeJS.ProcessEnv, input: string | Buffer | undefined, ok: readonly number[]): Promise<GitOutput> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn("git", args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const child = spawn((git ??= gitExecutable()), args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on("data", (d: Buffer) => out.push(d));
@@ -246,7 +289,14 @@ function compareCheckpoints(a: CheckpointId, b: CheckpointId): number {
 
 /** Session ids become ref and directory names; anything unusual is hashed. */
 export function safeSession(id: string): string {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) && !id.includes("..") && !id.endsWith(".lock") ? id : createHash("sha256").update(id).digest("hex").slice(0, 32);
+  const plain =
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) &&
+    !id.includes("..") &&
+    !id.endsWith(".lock") &&
+    // Windows drops a trailing dot from a file name and reserves device names
+    !id.endsWith(".") &&
+    !/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(id);
+  return plain ? id : createHash("sha256").update(id).digest("hex").slice(0, 32);
 }
 
 export type TreeResult = { tree: string; unreadable: string[] };
@@ -259,12 +309,54 @@ export async function snapshotTree(store: Store): Promise<TreeResult> {
     if (add.code === 1 && unreadable.length === 0) throw new GitError("add", add);
     if (store.git) {
       // Files the project tracks although an ignore rule matches them are part of its content.
+      // Their names are paths, not patterns: a tracked "*.log" must not stage every ignored .log file.
       const tracked = await projectGit(store.root, ["ls-files", "-z", "-c", "-i", "--exclude-standard"]);
-      if (tracked.stdout.length) await runGit(store, ["add", "-f", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"], { input: tracked.stdout, ok: [0, 1] });
+      if (tracked.stdout.length) await runGit(store, ["--literal-pathspecs", "add", "-f", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"], { input: tracked.stdout, ok: [0, 1] });
     }
+    await dropCaseGhosts(store);
     const tree = text((await runGit(store, ["write-tree"])).stdout);
     return { tree, unreadable };
   });
+}
+
+/** Names that a case-insensitive file system (Windows, macOS by default) treats as one. */
+const foldName = (name: string) => name.normalize("NFC").toLowerCase();
+
+/**
+ * After a case-only rename (Foo.ts to foo.ts, Dir to dir) a case-insensitive file system still
+ * finds the file under its old spelling, so the private index holds both. Keep the spelling the
+ * directory lists: the tree records names as they are, and a restore can bring the case back.
+ */
+async function dropCaseGhosts(store: Store): Promise<void> {
+  const groups = new Map<string, string[]>();
+  for (const rel of (await runGit(store, ["ls-files", "-z"])).stdout.toString("utf8").split("\0")) {
+    if (!rel) continue;
+    const group = groups.get(foldName(rel));
+    if (group) group.push(rel);
+    else groups.set(foldName(rel), [rel]);
+  }
+  const listings = new Map<string, Promise<Set<string>>>();
+  const listed = (dirRel: string) => {
+    let names = listings.get(dirRel);
+    if (!names) {
+      names = readdir(join(store.root, ...dirRel.split("/"))).then((n) => new Set(n.map((x) => x.normalize("NFC"))), () => new Set<string>());
+      listings.set(dirRel, names);
+    }
+    return names;
+  };
+  const onDisk = async (rel: string) => {
+    const parts = rel.split("/");
+    for (let i = 0; i < parts.length; i++) if (!(await listed(parts.slice(0, i).join("/"))).has(parts[i]!.normalize("NFC"))) return false;
+    return true;
+  };
+  const ghosts: string[] = [];
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const real = await Promise.all(group.map(onDisk));
+    if (!real.includes(true)) continue; // no spelling is listed as it is: keep them all
+    group.forEach((rel, i) => !real[i] && ghosts.push(rel));
+  }
+  if (ghosts.length) await runGit(store, ["update-index", "-z", "--force-remove", "--stdin"], { input: ghosts.join("\0") });
 }
 
 /** Snapshot the root and keep it under the checkpoint's ref. */
@@ -372,7 +464,7 @@ export async function journal(store: Store, session: string, c: CheckpointId, ab
   manifest.entries.push(entry);
   const tmp = `${manifestPath}.${randomBytes(4).toString("hex")}`;
   await writeFile(tmp, JSON.stringify(manifest));
-  await rename(tmp, manifestPath);
+  await retryLocked(() => rename(tmp, manifestPath));
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +484,30 @@ export type Plan = {
   skipped: string[];
   /** Paths the restore changes that the pre-undo tree does not hold, to journal before applying. */
   outsideTree: string[];
+  /** Symlinks among the changes that this system cannot create (Windows without Developer Mode or administrator rights). */
+  unsupportedLinks: number;
 };
+
+const isLink = (c: Change) => c.op === "link" || (c.op === "blob" && c.mode === "120000");
+
+const WINDOWS_SYMLINKS = "Windows creates symlinks only with Developer Mode on or with administrator rights";
+
+let symlinkProbe: Promise<boolean> | undefined;
+
+/** Whether this process can create symlinks: always outside Windows; on Windows, measured once. */
+function canSymlink(dir: string): Promise<boolean> {
+  if (!windows) return Promise.resolve(true);
+  return (symlinkProbe ??= (async () => {
+    const probe = join(dir, `symlink-probe-${randomBytes(4).toString("hex")}`);
+    try {
+      await symlink("target", probe);
+      await unlink(probe);
+      return true;
+    } catch {
+      return false;
+    }
+  })());
+}
 
 type RawDiff = { srcMode: string; dstMode: string; srcOid: string; status: string; rel: string };
 
@@ -554,7 +669,9 @@ async function planRestore(store: Store, session: string, target: Checkpoint, cu
     outsideTree.push(path);
   }
   changes.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return { changes, kept, skipped, outsideTree };
+  const links = changes.filter(isLink).length;
+  const unsupportedLinks = links && !(await canSymlink(store.dir)) ? links : 0;
+  return { changes, kept, skipped, outsideTree, unsupportedLinks };
 }
 
 /**
@@ -592,8 +709,23 @@ async function readBlobs(store: Store, oids: readonly string[]): Promise<Map<str
   return blobs;
 }
 
-/** Make the parent directories of `path` real directories, never following a symlink inside the root. */
-async function ensureParent(root: string, path: string): Promise<void> {
+/**
+ * On a case-insensitive file system `path` can exist under another case (dir for Dir): rename it
+ * to the case of `path`. On a case-sensitive file system another spelling is another file, and
+ * lstat(path) finds nothing, so nothing is renamed.
+ */
+async function matchCase(path: string): Promise<void> {
+  if (!(await exists(path))) return;
+  const parent = dirname(path);
+  const name = basename(path).normalize("NFC");
+  const names = await readdir(parent).catch(() => [] as string[]);
+  if (names.some((n) => n.normalize("NFC") === name)) return;
+  const other = names.find((n) => foldName(n) === foldName(name));
+  if (other !== undefined) await retryLocked(() => rename(join(parent, other), path));
+}
+
+/** Make the parent directories of `path` real directories with the case of its names, never following a symlink inside the root. */
+async function ensureParent(root: string, path: string, checked: Set<string>): Promise<void> {
   const rel = insideRoot(root, path);
   if (rel === undefined) {
     await mkdir(dirname(path), { recursive: true });
@@ -602,10 +734,14 @@ async function ensureParent(root: string, path: string): Promise<void> {
   let dir = root;
   for (const part of rel.split("/").slice(0, -1)) {
     dir = join(dir, part);
+    if (checked.has(dir)) continue;
     const st = await lstat(dir).catch(() => undefined);
-    if (st?.isDirectory()) continue;
-    if (st) await unlink(dir);
-    await mkdir(dir);
+    if (st?.isDirectory()) await matchCase(dir);
+    else {
+      if (st) await retryLocked(() => unlink(dir));
+      await mkdir(dir);
+    }
+    checked.add(dir);
   }
 }
 
@@ -617,6 +753,7 @@ async function clearDirectory(path: string): Promise<void> {
 
 async function replaceFile(path: string, data: Buffer | { copyFrom: string }, mode: (current: number) => number): Promise<void> {
   await clearDirectory(path);
+  await matchCase(path);
   const tmp = join(dirname(path), `.${parsePath(path).base}.pi-edit-guard-${randomBytes(4).toString("hex")}`);
   try {
     if (Buffer.isBuffer(data)) await writeFile(tmp, data);
@@ -624,7 +761,9 @@ async function replaceFile(path: string, data: Buffer | { copyFrom: string }, mo
     const prev = await lstat(path).catch(() => undefined);
     const base = prev?.isFile() ? prev.mode & 0o777 : (await stat(tmp)).mode & 0o777;
     await chmod(tmp, mode(base));
-    await rename(tmp, path);
+    // Windows cannot replace a read-only file; the replacement takes the mode computed above
+    if (windows && prev?.isFile() && !(prev.mode & 0o200)) await chmod(path, 0o666);
+    await retryLocked(() => rename(tmp, path));
   } catch (err) {
     await rm(tmp, { force: true });
     throw err;
@@ -633,7 +772,10 @@ async function replaceFile(path: string, data: Buffer | { copyFrom: string }, mo
 
 export type Applied = { deleted: number; written: number; errors: string[] };
 
-/** Apply a plan: deletions first (and the directories they leave empty), then writes. */
+/**
+ * Apply a plan: deletions first (and the directories they leave empty), then files, then symlinks:
+ * Windows gives a symlink the type (file or directory) of its target, which must exist by then.
+ */
 export async function applyRestore(store: Store, plan: Plan): Promise<Applied> {
   const blobs = await readBlobs(store, plan.changes.flatMap((c) => (c.op === "blob" ? [c.oid] : [])));
   for (const c of plan.changes) if (c.op === "copy" && !existsSync(c.src)) throw new Error(`journal file ${c.src} is missing`);
@@ -646,8 +788,8 @@ export async function applyRestore(store: Store, plan: Plan): Promise<Applied> {
     try {
       const st = await lstat(c.path).catch(() => undefined);
       if (!st) continue;
-      if (st.isDirectory()) await rmdir(c.path).catch(() => Promise.reject(new Error("a directory with other content is in the way")));
-      else await unlink(c.path);
+      if (st.isDirectory()) await retryLocked(() => rmdir(c.path)).catch(() => Promise.reject(new Error("a directory with other content is in the way")));
+      else await retryLocked(() => unlink(c.path));
       deleted++;
       for (let dir = dirname(c.path); insideRoot(store.root, dir); dir = dirname(dir)) {
         if (!(await rmdir(dir).then(() => true, () => false))) break;
@@ -656,10 +798,11 @@ export async function applyRestore(store: Store, plan: Plan): Promise<Applied> {
       errors.push(`${c.path}: ${(err as Error).message}`);
     }
   }
-  for (const c of plan.changes) {
-    if (c.op === "delete") continue;
+  const writes = plan.changes.filter((c) => c.op !== "delete");
+  const checked = new Set<string>();
+  for (const c of [...writes.filter((w) => !isLink(w)), ...writes.filter(isLink)]) {
     try {
-      await ensureParent(store.root, c.path);
+      await ensureParent(store.root, c.path, checked);
       if (c.op === "blob" && c.mode === "120000") await replaceLink(c.path, blobs.get(c.oid)!.toString("utf8"));
       else if (c.op === "blob") {
         const exec = c.mode === "100755";
@@ -676,14 +819,19 @@ export async function applyRestore(store: Store, plan: Plan): Promise<Applied> {
 
 async function replaceLink(path: string, target: string): Promise<void> {
   await clearDirectory(path);
-  if (await exists(path)) await unlink(path);
-  await symlink(target, path);
+  if (await exists(path)) await retryLocked(() => unlink(path));
+  try {
+    await symlink(target, path);
+  } catch (err) {
+    if (windows && (err as NodeJS.ErrnoException).code === "EPERM") throw new Error(WINDOWS_SYMLINKS);
+    throw err;
+  }
 }
 
 /** Drop a checkpoint: its ref and its journal. */
 export async function dropCheckpoint(store: Store, session: string, c: CheckpointId): Promise<void> {
   await runGit(store, ["update-ref", "-d", refName(session, c)], { ok: [0, 1] });
-  await rm(journalDir(store, session, c), { recursive: true, force: true });
+  await rm(journalDir(store, session, c), RM);
 }
 
 // ---------------------------------------------------------------------------
@@ -714,7 +862,7 @@ export async function retain(store: Store, session: string, keep: number): Promi
       await runGit(store, ["update-ref", "-d", refName(session, c)]);
       dropped++;
     }
-    if (!oldestKept || compareCheckpoints(c, oldestKept) < 0) await rm(journalDir(store, session, c), { recursive: true, force: true });
+    if (!oldestKept || compareCheckpoints(c, oldestKept) < 0) await rm(journalDir(store, session, c), RM);
   }
   const packs = (await readdir(join(store.dir, "objects", "pack")).catch(() => [] as string[])).filter((f) => f.endsWith(".pack")).length;
   if (dropped || packs > 25) {
@@ -739,17 +887,32 @@ export async function sweepStores(base: string, maxAgeDays: number, keepDir: str
   const removed: string[] = [];
   for (const name of names) {
     const store = join(dir, name);
-    if (!/^[0-9a-f]{16}$/.test(name) || store === keepDir) continue;
-    const used = await stat(join(store, "LAST_USED")).then((s) => s.mtimeMs, () => undefined);
-    const root = readFileIfExists(join(store, "ROOT")).trim();
-    const gone = root !== "" && !existsSync(root) && existsSync(dirname(root));
-    if ((used !== undefined && now - used > maxAgeDays * 86_400_000) || gone) {
-      await rm(store, { recursive: true, force: true });
-      removed.push(store);
+    try {
+      if (TRASH.test(name)) {
+        await rm(store, RM); // a delete that an exit interrupted
+        removed.push(store);
+        continue;
+      }
+      if (!/^[0-9a-f]{16}$/.test(name) || store === keepDir) continue;
+      const used = await stat(join(store, "LAST_USED")).then((s) => s.mtimeMs, () => undefined);
+      const root = readFileIfExists(join(store, "ROOT")).trim();
+      const gone = root !== "" && !existsSync(root) && existsSync(dirname(root));
+      if ((used !== undefined && now - used > maxAgeDays * 86_400_000) || gone) {
+        // One rename takes the store out of use. An exit during the slow delete then leaves a trash
+        // directory for the next sweep, never a store without ROOT and LAST_USED that no sweep removes.
+        const trash = `${store}.trash-${randomBytes(4).toString("hex")}`;
+        await rename(store, trash);
+        removed.push(store);
+        await rm(trash, RM);
+      }
+    } catch {
+      // in use (Windows refuses to rename a store that another git holds open) or taken by another sweep: the next sweep retries
     }
   }
   return removed;
 }
+
+const TRASH = /^[0-9a-f]{16}\.trash-[0-9a-f]{8}$/;
 
 /** For display: a path relative to the root when inside it. */
 function shown(store: Store, path: string): string {
@@ -764,6 +927,7 @@ export function describePlan(store: Store, plan: Plan, max = 20): string {
   if (plan.changes.length > max) lines.push(`  … ${plan.changes.length - max} more`);
   if (plan.kept.length) lines.push(`${plan.kept.length} paths created since then match an ignore rule of that state and stay.`);
   if (plan.skipped.length) lines.push(`${plan.skipped.length} nested repositories are not covered and stay.`);
+  if (plan.unsupportedLinks) lines.push(`${plan.unsupportedLinks} symlinks cannot be restored: ${WINDOWS_SYMLINKS}.`);
   return lines.join("\n");
 }
 

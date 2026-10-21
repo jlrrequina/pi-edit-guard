@@ -9,10 +9,11 @@
  * Runs: PEG_PROPERTY_RUNS (default 300, split between git and plain roots).
  */
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import fc from "fast-check";
+import { pathKey } from "../guard/paths.ts";
 import { applyRestore, createCheckpoint, findRoot, journal, needsJournal, openStore, prepareRestore } from "../guard/snapshot.ts";
 import type { Checkpoint, Store } from "../guard/snapshot.ts";
 import { cleanup, initRepo, projectGitState, readTree, sameTree, tempDir, writeFile, writeLink } from "./helpers.ts";
@@ -42,7 +43,8 @@ type Mut =
   | { op: "writeTool"; path: string; content: Buffer }
   | { op: "writeIgnored"; path: "keep.log" | "ignored/secret.txt" | "new.log"; content: Buffer }
   | { op: "writeOutside"; path: "o1.txt" | "o2.txt"; content: Buffer }
-  | { op: "gitignore"; content: string };
+  | { op: "gitignore"; content: string }
+  | { op: "recase"; pick: number; depth: number };
 
 const mut: fc.Arbitrary<Mut> = fc.oneof(
   fc.record({ op: fc.constantFrom("modify" as const, "delete" as const, "chmod" as const, "toDir" as const), pick: fc.nat(), content: bytes }),
@@ -52,7 +54,10 @@ const mut: fc.Arbitrary<Mut> = fc.oneof(
   fc.record({ op: fc.constant("writeIgnored" as const), path: fc.constantFrom("keep.log" as const, "ignored/secret.txt" as const, "new.log" as const), content: bytes }),
   fc.record({ op: fc.constant("writeOutside" as const), path: fc.constantFrom("o1.txt" as const, "o2.txt" as const), content: bytes }),
   fc.record({ op: fc.constant("gitignore" as const), content: fc.constantFrom("", "*.log\n", "ignored/\n", "*.log\nignored/\n") }),
+  fc.record({ op: fc.constant("recase" as const), pick: fc.nat(), depth: fc.nat() }),
 );
+
+const swapCase = (s: string) => [...s].map((c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase())).join("");
 
 const scenario = fc.record({
   tree,
@@ -136,6 +141,19 @@ async function apply(m: Mut, root: string, outside: string, write: (abs: string)
     case "gitignore":
       writeFile(root, ".gitignore", m.content);
       return;
+    case "recase": {
+      // a shell renaming a file or one of its directories to another case (Foo.ts to foo.ts)
+      const p = at(m.pick);
+      if (!p) return;
+      const parts = p.split("/");
+      const i = m.depth % parts.length;
+      const from = join(root, ...parts.slice(0, i + 1));
+      const to = join(root, ...parts.slice(0, i), swapCase(parts[i]!));
+      const other = lstatSync(to, { throwIfNoEntry: false });
+      if (from === to || (other && other.ino !== lstatSync(from).ino)) return; // case-sensitive: another file has that name
+      renameSync(from, to);
+      return;
+    }
   }
 }
 
@@ -165,7 +183,8 @@ async function check(gitRoot: boolean, s: Scenario): Promise<void> {
       const { commit } = await createCheckpoint(store, SESSION, c);
       checkpoints.push({ ...c, commit });
       const write = async (abs: string) => {
-        if (await needsJournal(store, commit, abs)) await journal(store, SESSION, c, abs);
+        const key = pathKey(abs); // as index.ts keys write targets: the names on disk
+        if (await needsJournal(store, commit, key)) await journal(store, SESSION, c, key);
       };
       for (const m of s.runs[i]!) await apply(m, root, outside, write);
     }

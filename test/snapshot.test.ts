@@ -1,9 +1,9 @@
 /** Snapshot, journal and restore on fixed scenarios (the property test randomizes them). */
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, retain, runGit, refuseRoot, sweepStores, storeDir } from "../guard/snapshot.ts";
+import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, describePlan, gitExecutable, retain, retryLocked, runGit, refuseRoot, safeSession, sweepStores, storeDir } from "../guard/snapshot.ts";
 import type { Checkpoint, CheckpointId, Store } from "../guard/snapshot.ts";
 import { cleanup, initRepo, projectGitState, readTree, sameTree, tempDir, writeFile, writeLink } from "./helpers.ts";
 
@@ -148,6 +148,47 @@ for (const gitRoot of [true, false]) {
     }
   });
 
+  test(`${kind}: case-only renames of a file and a directory restore the names' case`, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      const foldsCase = existsSync(join(root, "SRC"));
+      // an ignored file keeps the directory alive through the restore's deletions
+      if (foldsCase) writeFile(root, "bin/trace.log", "ignored, inside a directory whose case changes\n");
+      const before = readTree(root);
+      const run1 = await runWith(store, 1, () => {
+        renameSync(join(root, "src/a.ts"), join(root, "src/A.ts"));
+        writeFile(root, "src/A.ts", "changed\n");
+        renameSync(join(root, "bin"), join(root, "Bin"));
+      });
+      const { preUndo } = await undo(store, run1, 1, 1);
+      assert.equal(sameTree(before, readTree(root)), undefined);
+      await undo(store, preUndo, 2, 1);
+      assert.deepEqual(readdirSync(root).filter((n) => /^(src|bin)$/i.test(n)).sort(), ["Bin", "src"]);
+      assert.deepEqual(readdirSync(join(root, "src")).sort(), ["A.ts", "b.ts"]);
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
+  test(`${kind}: a symlink to a directory restores together with the directory and still leads into it`, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      writeFile(root, "assets/logo.svg", "<svg/>\n");
+      writeLink(root, "assets-link", "assets");
+      const before = readTree(root);
+      const run1 = await runWith(store, 1, () => {
+        unlinkSync(join(root, "assets-link"));
+        rmSync(join(root, "assets"), { recursive: true });
+      });
+      await undo(store, run1, 1, 1);
+      assert.equal(sameTree(before, readTree(root)), undefined);
+      // Windows types a symlink as a file or a directory link by its target when it is created
+      assert.deepEqual(readdirSync(join(root, "assets-link")), ["logo.svg"]);
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
   test(`${kind}: /undo pre-undo-<k> reverses an undo exactly, journaled paths included`, async () => {
     const { root, base, outside, store } = await setup(gitRoot);
     try {
@@ -265,7 +306,72 @@ test("sweep: stores of deleted roots and stale stores go; the current store and 
     assert.deepEqual(removed.sort(), [deleted.dir, stale.dir].sort());
     assert.ok(existsSync(keep.dir) && existsSync(unmounted.dir));
     assert.equal(storeDir(base, join(parent, "keep")), keep.dir);
+    assert.deepEqual(readdirSync(join(base, "stores")).sort(), [keep.dir, unmounted.dir].map((d) => d.slice(join(base, "stores").length + 1)).sort(), "nothing is left behind");
   } finally {
     cleanup(base, parent);
+  }
+});
+
+test("sweep: a delete that an exit interrupted is finished by the next sweep", async () => {
+  const base = tempDir();
+  try {
+    const trash = join(base, "stores", "0123456789abcdef.trash-89abcdef");
+    writeFile(trash, "objects/pack/half-deleted.pack", "x");
+    assert.deepEqual(await sweepStores(base, 30, join(base, "stores", "fedcba9876543210")), [trash]);
+    assert.ok(!existsSync(trash));
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("git: on Windows without git on the PATH, the git.exe of the Git for Windows installation that \u03c0's bash comes from", () => {
+  const env = { PATH: "C:\\Windows\\system32", ProgramFiles: "C:\\Program Files" };
+  const installed = "C:\\Program Files\\Git\\cmd\\git.exe";
+  assert.equal(gitExecutable("win32", env, (p) => p === installed), installed);
+  assert.equal(gitExecutable("win32", env, (p) => p === "C:\\Windows\\system32\\git.exe" || p === installed), "git", "git on the PATH wins");
+  assert.equal(gitExecutable("win32", env, () => false), "git", "nothing found: spawn reports the error");
+  assert.equal(gitExecutable("linux", env, () => true), "git");
+});
+
+test("retryLocked: on Windows a file another process holds open is retried; other errors and other systems fail at once", async () => {
+  const failing = (codes: string[]) => {
+    let calls = 0;
+    return { fn: async () => (calls < codes.length ? Promise.reject(Object.assign(new Error(codes[calls]!), { code: codes[calls++] })) : ++calls), calls: () => calls };
+  };
+  const busy = failing(["EBUSY", "EPERM"]);
+  assert.equal(await retryLocked(busy.fn, "win32"), 3);
+  const missing = failing(["ENOENT"]);
+  await assert.rejects(retryLocked(missing.fn, "win32"), /ENOENT/);
+  assert.equal(missing.calls(), 1);
+  const posix = failing(["EBUSY"]);
+  await assert.rejects(retryLocked(posix.fn, "linux"), /EBUSY/);
+  assert.equal(posix.calls(), 1);
+});
+
+test("session ids become directory and ref names only when they are safe on every system; others are hashed", () => {
+  assert.equal(safeSession("0198f6a2-7c1e-7b4a-9d2e-3f5a6b7c8d9e"), "0198f6a2-7c1e-7b4a-9d2e-3f5a6b7c8d9e");
+  for (const id of ["name.", "CON", "nul.txt", "lpt1", "a/b", "..x", "x.lock", ""]) assert.match(safeSession(id), /^[0-9a-f]{32}$/, id);
+});
+
+test("the restore preview says when this system cannot create the plan's symlinks", () => {
+  const store = { dir: "/store", root: "/root", git: false };
+  const plan = { changes: [{ op: "link" as const, path: "/root/l", target: "t" }], kept: [], skipped: [], outsideTree: [], unsupportedLinks: 1 };
+  assert.match(describePlan(store, plan), /\n1 symlinks cannot be restored: Windows creates symlinks only with Developer Mode on or with administrator rights\.$/);
+  assert.doesNotMatch(describePlan(store, { ...plan, unsupportedLinks: 0 }), /cannot be restored/);
+});
+
+test("windows: a junction is recorded as a link, never followed, and restores", { skip: process.platform !== "win32" }, async () => {
+  const { root, base, outside, store } = await setup(true);
+  try {
+    writeFile(outside, "shared/data.txt", "outside the root\n");
+    symlinkSync(join(outside, "shared"), join(root, "shared"), "junction");
+    const run1 = await runWith(store, 1, () => rmSync(join(root, "shared")));
+    const tree = (await runGit(store, ["ls-tree", "-r", "--name-only", run1.commit!])).stdout.toString();
+    assert.ok(!tree.includes("shared/data.txt"), "the files behind a junction are not in the snapshot");
+    await undo(store, run1, 1, 1);
+    assert.ok(lstatSync(join(root, "shared")).isSymbolicLink());
+    assert.deepEqual(readdirSync(join(root, "shared")), ["data.txt"]);
+  } finally {
+    cleanup(root, base, outside);
   }
 });
