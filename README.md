@@ -93,7 +93,7 @@ A run whose snapshot failed cannot be undone; `/undo` says so and names the run 
 
 Outside git, the store also ignores `.git`, `node_modules`, `.pnpm-store`, `dist`, `build`, `out`, `target`, `.venv`, `venv`, `__pycache__`, `.next`, `.nuxt`, `.cache`, `coverage` and `.DS_Store`. In a git work tree the project's own ignore rules decide.
 
-`PI_EDIT_GUARD_DEBUG=1` writes one JSON line per decision to `$TMPDIR/pi-edit-guard/debug.jsonl`.
+`PI_EDIT_GUARD_DEBUG=1` writes one JSON line per decision to `pi-edit-guard/debug.jsonl` in the temporary directory (`$TMPDIR`, or `%TEMP%` on Windows).
 
 ## Secrets
 

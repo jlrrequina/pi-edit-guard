@@ -412,11 +412,12 @@ test("lsp_fix, when installed, is a write tool only with write: true, and its re
 test("/guard toggles and status, /checkpoints, config errors, and the debug log", async () => {
   const p = project();
   const tmp = tempDir("peg-tmp-");
-  const prevTmp = process.env.TMPDIR;
+  const tmpVars = ["TMPDIR", "TEMP", "TMP"]; // os.tmpdir() reads TMPDIR, and TEMP or TMP on Windows
+  const prevTmp = tmpVars.map((k) => process.env[k]);
   try {
     mkdirSync(join(p.agent, "pi-edit-guard"), { recursive: true });
     writeFileSync(join(p.agent, "pi-edit-guard", "config.json"), JSON.stringify({ repeatLimit: 1, bogus: true }));
-    process.env.TMPDIR = tmp;
+    for (const k of tmpVars) process.env[k] = tmp;
     process.env.PI_EDIT_GUARD_DEBUG = "1";
     const h = new Harness(p.root);
     await h.startSession();
@@ -440,8 +441,10 @@ test("/guard toggles and status, /checkpoints, config errors, and the debug log"
     assert.ok(log.some((l) => l.event === "snapshot" && l.run === 1));
   } finally {
     delete process.env.PI_EDIT_GUARD_DEBUG;
-    if (prevTmp === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = prevTmp;
+    tmpVars.forEach((k, i) => {
+      if (prevTmp[i] === undefined) delete process.env[k];
+      else process.env[k] = prevTmp[i];
+    });
     cleanup(tmp);
     p.done();
   }

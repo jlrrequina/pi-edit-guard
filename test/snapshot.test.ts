@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, describePlan, dropFollowedLinks, gitExecutable, linkedDirectories, retain, retryLocked, runGit, refuseRoot, safeSession, sweepStores, storeDir } from "../guard/snapshot.ts";
 import type { Checkpoint, CheckpointId, Store } from "../guard/snapshot.ts";
+import { pathKey } from "../guard/paths.ts";
 import { cleanup, initRepo, projectGitState, readTree, sameTree, tempDir, writeFile, writeLink } from "./helpers.ts";
 
 const SESSION = "s1";
@@ -43,7 +44,8 @@ async function runWith(store: Store, n: number, mutate: (write: (abs: string) =>
   const c: CheckpointId = { kind: "run", n };
   const { commit } = await createCheckpoint(store, SESSION, c);
   const write = async (abs: string) => {
-    if (await needsJournal(store, commit, abs)) await journal(store, SESSION, c, abs);
+    const key = pathKey(abs); // as index.ts keys write targets: through links to the file itself
+    if (await needsJournal(store, commit, key)) await journal(store, SESSION, c, key);
   };
   await mutate(write);
   return { ...c, commit };
