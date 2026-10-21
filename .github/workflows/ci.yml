@@ -18,7 +18,8 @@ jobs:
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Windows runs take about 13 minutes (git processes start slowly there)
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
