@@ -100,6 +100,9 @@ export default function piEditGuard(pi: ExtensionAPI): void {
   const calls = new Map<string, Call>();
   const topOf = new Map<string, string>();
   let syncedLeaf: string | null | undefined;
+  /** The latest background snapshot of the root. It holds the private index lock, so every snapshot waits for it. */
+  let warmUp: Promise<void> = Promise.resolve();
+  let warmed = false;
 
   const base = () => join(getAgentDir(), "pi-edit-guard");
 
@@ -111,6 +114,12 @@ export default function piEditGuard(pi: ExtensionAPI): void {
       return openStore(base(), root, config.exclude);
     })();
     return storePromise;
+  }
+
+  /** The store, once the warm-up has finished. */
+  async function readyStore(ctx: ExtensionContext): Promise<Store> {
+    await warmUp;
+    return getStore(ctx);
   }
 
   function newRun(): Run {
@@ -148,7 +157,7 @@ export default function piEditGuard(pi: ExtensionAPI): void {
     const r = (run ??= newRun());
     r.ready ??= (async () => {
       try {
-        const store = await getStore(ctx);
+        const store = await readyStore(ctx);
         if (runCounter === undefined) {
           const known = await listCheckpoints(store, session);
           runCounter = Math.max(0, ...known.flatMap((c) => (c.kind === "run" ? [c.n] : [])));
@@ -214,6 +223,7 @@ export default function piEditGuard(pi: ExtensionAPI): void {
     }
     state = createState();
     storePromise = undefined;
+    warmed = false;
     runCounter = undefined;
     run = lastRun = undefined;
     uncovered.clear();
@@ -268,8 +278,20 @@ export default function piEditGuard(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("before_agent_start", () => {
+  pi.on("before_agent_start", (_event, ctx) => {
     run = newRun();
+    // The first snapshot of a root writes every file into the store: seconds on a large project. Take it
+    // while the model works on the first prompt; the snapshot before the run's first change is then incremental.
+    if (toggles.snapshots && !warmed) {
+      warmed = true;
+      warmUp = warmUp
+        .then(async () => {
+          const started = Date.now();
+          await snapshotTree(await getStore(ctx));
+          debug("warm-up", { ms: Date.now() - started });
+        })
+        .catch((err) => debug("warm-up-failed", { error: message(err) }));
+    }
   });
 
   pi.on("agent_end", () => {
@@ -414,7 +436,7 @@ export default function piEditGuard(pi: ExtensionAPI): void {
         const words = args.split(/\s+/).filter(Boolean);
         const yes = words.includes("--yes");
         const spec = words.find((w) => w !== "--yes");
-        const store = await getStore(ctx);
+        const store = await readyStore(ctx);
         const { all, latest } = await latestRun(store);
         let target: Checkpoint | undefined;
         let name: string;
@@ -483,7 +505,7 @@ export default function piEditGuard(pi: ExtensionAPI): void {
     description: "List this session's checkpoints and how many paths differ from now",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       try {
-        const store = await getStore(ctx);
+        const store = await readyStore(ctx);
         const { all } = await latestRun(store);
         if (!all.length) {
           ctx.ui.notify("edit-guard: no checkpoints in this session yet.", "info");

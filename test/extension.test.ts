@@ -4,6 +4,7 @@
  * directory, so ~/.pi is untouched.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -60,6 +61,55 @@ test("a run: read→edit allowed, stale or unread writes blocked, one run ref in
     const observations = h.sm.getEntries().filter((e) => e.type === "custom" && e.customType === OBSERVATION_TYPE);
     assert.ok(observations.length >= 4, "observations are persisted in the session");
   } finally {
+    p.done();
+  }
+});
+
+test("warm-up: the first prompt snapshots the root in the background, before any change; it records no checkpoint", async () => {
+  const p = project();
+  try {
+    const h = new Harness(p.root);
+    await h.startSession();
+    await h.run(async () => {
+      await h.call("read", { path: "a.ts" });
+      const index = join(p.store.dir, "index");
+      for (let i = 0; i < 250 && !existsSync(index); i++) await new Promise((r) => setTimeout(r, 20));
+      assert.ok(existsSync(index), "the store and its index exist while the run has changed nothing");
+      assert.deepEqual(await p.refs(), []);
+      await h.call("edit", edit("a.ts", "one", "two"));
+    });
+    assert.deepEqual(await p.refs(), [`refs/runs/${h.sm.getSessionId()}/1`]);
+  } finally {
+    p.done();
+  }
+});
+
+test("warm-up: a change while the background snapshot holds the index lock waits for it, so the run is covered", { skip: process.platform === "win32" }, async () => {
+  const p = project();
+  const bin = tempDir("peg-bin-");
+  const path = process.env.PATH;
+  try {
+    // A git whose first `add -A` on a store holds index.lock for 2.5 s, as on a large project:
+    // longer than a snapshot retries a held lock (1.5 s). The `.slow` directory marks that call.
+    const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\ncase " $* " in *" add -A "*) if [ -n "$GIT_INDEX_FILE" ] && mkdir "$GIT_INDEX_FILE.slow" 2>/dev/null; then : > "$GIT_INDEX_FILE.lock"; sleep 2.5; rm -f "$GIT_INDEX_FILE.lock"; fi;; esac\nexec "${realGit}" "$@"\n`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    process.env.PATH = `${bin}:${path}`;
+    const h = new Harness(p.root);
+    await h.startSession();
+    await h.run(async () => {
+      for (let i = 0; i < 250 && !existsSync(join(p.store.dir, "index.slow")); i++) await new Promise((r) => setTimeout(r, 20));
+      assert.ok(existsSync(join(p.store.dir, "index.lock")), "the warm-up holds the lock");
+      assert.equal((await h.call("bash", { command: "echo 1 > n.txt" })).blocked, undefined);
+    });
+    assert.deepEqual(await p.refs(), [`refs/runs/${h.sm.getSessionId()}/1`]);
+    assert.match(await h.command("guard"), /run 1: covered/);
+  } finally {
+    process.env.PATH = path;
+    cleanup(bin);
     p.done();
   }
 });
