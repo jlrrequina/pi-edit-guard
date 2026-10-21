@@ -8,9 +8,22 @@ export function tempDir(prefix = "peg-"): string {
   return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
 }
 
-/** Windows refuses to delete a directory while a process works in it, such as a background snapshot's git: retry. */
+/**
+ * Windows refuses to delete a directory while a process works in it, such as the git of a background
+ * snapshot or retention: retry for up to 5 s (rmSync's own retries do not cover EBUSY on a directory).
+ */
 export function cleanup(...dirs: string[]): void {
-  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  for (const d of dirs) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rmSync(d, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+        break;
+      } catch (err) {
+        if (attempt >= 50) throw err;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      }
+    }
+  }
 }
 
 export type Node = { kind: "file"; content: string; exec: boolean } | { kind: "link"; target: string };
