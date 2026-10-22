@@ -15,6 +15,9 @@ name: Release
 # yourself runs publish directly. npm authentication is trusted publishing (OIDC) from the
 # "npm" environment: there is no npm token. Everything is safe to re-run: an existing tag is
 # not recreated, a published version is not republished, an existing release is left alone.
+# Repository setup: the "npm" environment deploys only from main and v* tags; the package's
+# trusted publisher on npmjs.com names this file and that environment; a rule on main that
+# requires pull requests stops prepare from pushing the release commit.
 on:
   push:
     branches: [main]

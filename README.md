@@ -145,7 +145,7 @@ npm run corpus       # snapshot and restore of public repositories, with timings
 pi -e ./index.ts     # try the working copy
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the release process and [SECURITY.md](SECURITY.md) for reporting a vulnerability.
+See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 

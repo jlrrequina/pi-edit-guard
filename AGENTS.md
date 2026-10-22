@@ -21,4 +21,4 @@ PI_EDIT_GUARD_E2E_MODEL=<provider/model> npm run e2e   # a live pi -p run
 PI_EDIT_GUARD_DEBUG=1 pi -e ./index.ts          # decisions in $TMPDIR/pi-edit-guard/debug.jsonl
 ```
 
-See each new test fail without your change. Add changelog entries under `## Unreleased` in `CHANGELOG.md`; the heading's marker (`(minor)`, `(major)`, `(X.Y.Z)`) picks the next version, and a push to `main` releases (see `CONTRIBUTING.md`). Never release by hand. Commit messages: `area: what changed`, lowercase.
+See each new test fail without your change. Add changelog entries under `## Unreleased` in `CHANGELOG.md`; the heading's marker (`(minor)`, `(major)`, `(X.Y.Z)`) picks the next version, and a push to `main` releases (see the header of `.github/workflows/release.yml`). Never release by hand. Commit messages: `area: what changed`, lowercase.
