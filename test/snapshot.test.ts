@@ -1,6 +1,6 @@
 /** Snapshot, journal and restore on fixed scenarios (the property test randomizes them). */
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, describePlan, dropFollowedLinks, gitExecutable, linkedDirectories, retain, retryLocked, runGit, refuseRoot, safeSession, sweepStores, storeDir } from "../guard/snapshot.ts";
@@ -180,6 +180,22 @@ for (const gitRoot of [true, false]) {
     }
   });
 
+  test(`${kind}: where case does not matter, a write to the old spelling of a renamed file is undone without deleting the file`, { skip: caseSensitive }, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      const before = readTree(root);
+      const run1 = await runWith(store, 1, async (write) => {
+        renameSync(join(root, "src/a.ts"), join(root, "src/A.ts"));
+        await write(join(root, "src/a.ts")); // journaled under its name on disk, src/A.ts
+        writeFile(root, "src/a.ts", "export const a = 1;\n");
+      });
+      await undo(store, run1, 1, 1);
+      assert.equal(sameTree(before, readTree(root)), undefined);
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
   test(`${kind}: where case matters, two names that differ only in case are two files, and both stay`, { skip: !caseSensitive }, async () => {
     const { root, base, outside, store } = await setup(gitRoot);
     try {
@@ -233,6 +249,24 @@ for (const gitRoot of [true, false]) {
       await undo(store, preUndo, 2, 1);
       assert.equal(sameTree(afterRun.tree, readTree(root)), undefined);
       assert.equal(sameTree(afterRun.outside, readTree(outside)), undefined);
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
+  test(`${kind}: a file restored from the journal gets a new modification time, so the next snapshot sees the change`, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      const old = new Date(Date.now() - 3_600_000);
+      utimesSync(join(root, ".env"), old, old); // Windows' CopyFile gives a copy the time of its source
+      const run1 = await runWith(store, 1, async (write) => {
+        await write(join(root, ".env"));
+        writeFile(root, ".env", "SECRET=2\n"); // the same size: the private index tells it apart by its time
+      });
+      const started = Date.now();
+      await undo(store, run1, 1, 1);
+      assert.equal(readFileSync(join(root, ".env"), "utf8"), "SECRET=1\n");
+      assert.ok(statSync(join(root, ".env")).mtimeMs >= started - 2_000, "the restored file does not keep the time of the journal copy");
     } finally {
       cleanup(root, base, outside);
     }

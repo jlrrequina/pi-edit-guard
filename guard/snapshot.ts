@@ -363,11 +363,19 @@ export async function dropFollowedLinks(store: Store, names: readonly string[], 
     for (let i = rel.indexOf("/"); i !== -1; i = rel.indexOf("/", i + 1)) (levels[level++] ??= new Set()).add(rel.slice(0, i));
   }
   const found: string[] = [];
+  const below = new Set<string>(); // the links found so far and the directories under them
   for (const level of levels) {
-    const dirs = [...level].filter((dir) => !found.some((link) => dir.startsWith(`${link}/`)));
+    const dirs: string[] = [];
+    for (const dir of level) {
+      const slash = dir.lastIndexOf("/");
+      if (slash !== -1 && below.has(dir.slice(0, slash))) below.add(dir);
+      else dirs.push(dir);
+    }
     const stats = await Promise.all(dirs.map((dir) => lstat(join(store.root, ...dir.split("/"))).catch(() => undefined)));
     dirs.forEach((dir, i) => {
-      if (stats[i]?.isSymbolicLink()) found.push(dir);
+      if (!stats[i]?.isSymbolicLink()) return;
+      found.push(dir);
+      below.add(dir);
     });
   }
   if (!found.length) return;
@@ -491,11 +499,12 @@ export async function needsJournal(store: Store, commit: string | undefined, abs
 /**
  * lstat of `path` as a checkpoint's tree sees it. git never follows a symlink inside the root, so
  * there a path below a symlink or a file does not exist: following the link could loop or reach a
- * file outside the project. undefined when the path does not exist; other errors are thrown.
+ * file outside the project. undefined when the path does not exist, and when it cannot be read;
+ * `strict` throws that error instead.
  */
-async function lstatAsTree(root: string, path: string): Promise<Stats | undefined> {
+async function lstatAsTree(root: string, path: string, strict = false): Promise<Stats | undefined> {
   const missing = (err: NodeJS.ErrnoException) => {
-    if (err.code === "ENOENT" || err.code === "ENOTDIR") return undefined;
+    if (!strict || err.code === "ENOENT" || err.code === "ENOTDIR") return undefined;
     throw err;
   };
   let dir = root;
@@ -508,7 +517,7 @@ async function lstatAsTree(root: string, path: string): Promise<Stats | undefine
 
 /** Whether `path` exists as a checkpoint's tree sees it; an unreadable path counts as absent. */
 function existsAsTree(root: string, path: string): Promise<boolean> {
-  return lstatAsTree(root, path).then(Boolean, () => false);
+  return lstatAsTree(root, path).then(Boolean);
 }
 
 /**
@@ -528,7 +537,7 @@ export async function journal(store: Store, session: string, c: CheckpointId, ab
   await mkdir(dir, { recursive: true, mode: 0o700 });
   let entry: JournalEntry;
   try {
-    const st = await lstatAsTree(store.root, abs);
+    const st = await lstatAsTree(store.root, abs, true);
     if (!st) entry = { path: abs, kind: "absent" };
     else if (st.isSymbolicLink()) entry = { path: abs, kind: "symlink", target: await readlink(abs) };
     else if (st.isFile()) {
@@ -640,7 +649,7 @@ const exists = (path: string) => lstat(path).then(() => true, () => false);
 
 /** The change a journal record asks for, or undefined when the path is already in that state. */
 async function fromRecord(root: string, path: string, entry: JournalEntry, dir: string): Promise<Change | undefined> {
-  const st = await lstatAsTree(root, path).catch(() => undefined);
+  const st = await lstatAsTree(root, path);
   if (entry.kind === "absent") return st ? { op: "delete", path } : undefined;
   if (entry.kind === "symlink") return st?.isSymbolicLink() && (await readlink(path).catch(() => undefined)) === entry.target ? undefined : { op: "link", path, target: entry.target };
   const src = join(dir, entry.file);
@@ -716,15 +725,31 @@ async function planRestore(store: Store, session: string, target: Checkpoint, cu
     open = open.filter((r) => !has.has(r));
   }
   const listings = new Map<string, Promise<Map<string, { mode: string; oid: string }>>>();
-  const entryIn = async (commit: string, rel: string) => {
+  const treeOf = (commit: string) => {
     if (!listings.has(commit)) listings.set(commit, listTree(store, commit));
-    return (await listings.get(commit)!).get(rel);
+    return listings.get(commit)!;
+  };
+  const entryIn = async (commit: string, rel: string) => (await treeOf(commit)).get(rel);
+  // Where case does not matter, another spelling of a path in the target's tree is that same file, not one created since.
+  let folded: Promise<Map<string, string[]>> | undefined;
+  const sameFileInTarget = async (rel: string, path: string) => {
+    folded ??= treeOf(target.commit!).then((tree) => {
+      const byFold = new Map<string, string[]>();
+      for (const r of tree.keys()) byFold.set(foldName(r), [...(byFold.get(foldName(r)) ?? []), r]);
+      return byFold;
+    });
+    const st = await lstatAsTree(store.root, path);
+    for (const r of (await folded).get(foldName(rel)) ?? []) {
+      const other = r === rel ? undefined : await lstatAsTree(store.root, join(store.root, r));
+      if (st && other && other.ino === st.ino && other.dev === st.dev) return true;
+    }
+    return false;
   };
 
   for (const rel of candidates) {
     const path = join(store.root, rel);
     let change: Change | undefined;
-    if (!outside.has(rel)) change = (await existsAsTree(store.root, path)) ? { op: "delete", path } : undefined;
+    if (!outside.has(rel)) change = (await existsAsTree(store.root, path)) && !(await sameFileInTarget(rel, path)) ? { op: "delete", path } : undefined;
     else {
       const record = records.get(path);
       const tree = treeRecord.get(rel);
@@ -835,7 +860,12 @@ async function removeEmptyDirectories(dir: string): Promise<boolean> {
   for (const e of await readdir(dir, { withFileTypes: true })) {
     if (!e.isDirectory() || !(await removeEmptyDirectories(join(dir, e.name)))) return false;
   }
-  return retryLocked(() => rmdir(dir)).then(() => true, () => false);
+  try {
+    await retryLocked(() => rmdir(dir));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function replaceFile(path: string, data: Buffer | { copyFrom: string }, mode: (current: number) => number): Promise<void> {
@@ -844,7 +874,12 @@ async function replaceFile(path: string, data: Buffer | { copyFrom: string }, mo
   const tmp = join(dirname(path), `.${parsePath(path).base}.pi-edit-guard-${randomBytes(4).toString("hex")}`);
   try {
     if (Buffer.isBuffer(data)) await writeFile(tmp, data);
-    else await copyFile(data.copyFrom, tmp);
+    else {
+      await copyFile(data.copyFrom, tmp);
+      // Windows' CopyFile keeps the source's modification time: at the same size the private index would take the file for unchanged
+      const now = new Date();
+      await utimes(tmp, now, now);
+    }
     const prev = await lstat(path).catch(() => undefined);
     const base = prev?.isFile() ? prev.mode & 0o777 : (await stat(tmp)).mode & 0o777;
     await chmod(tmp, mode(base));
@@ -873,7 +908,7 @@ export async function applyRestore(store: Store, plan: Plan): Promise<Applied> {
   const deletions = plan.changes.filter((c) => c.op === "delete").sort((a, b) => b.path.split(sep).length - a.path.split(sep).length || (a.path < b.path ? 1 : -1));
   for (const c of deletions) {
     try {
-      const st = await lstatAsTree(store.root, c.path).catch(() => undefined);
+      const st = await lstatAsTree(store.root, c.path);
       if (!st) continue;
       if (st.isDirectory()) await clearDirectory(c.path);
       else await retryLocked(() => unlink(c.path));
