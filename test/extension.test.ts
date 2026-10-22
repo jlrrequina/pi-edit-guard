@@ -90,11 +90,12 @@ test("warm-up: a change while the background snapshot holds the index lock waits
   const path = process.env.PATH;
   try {
     // A git whose first `add -A` on a store holds index.lock for 2.5 s, as on a large project:
-    // longer than a snapshot retries a held lock (1.5 s). The `.slow` directory marks that call.
+    // longer than a snapshot retries a held lock (1.5 s). `.gate` lets only the first call through;
+    // `.slow` appears once that call holds the lock.
     const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
     writeFileSync(
       join(bin, "git"),
-      `#!/bin/sh\ncase " $* " in *" add -A "*) if [ -n "$GIT_INDEX_FILE" ] && mkdir "$GIT_INDEX_FILE.slow" 2>/dev/null; then : > "$GIT_INDEX_FILE.lock"; sleep 2.5; rm -f "$GIT_INDEX_FILE.lock"; fi;; esac\nexec "${realGit}" "$@"\n`,
+      `#!/bin/sh\ncase " $* " in *" add -A "*) if [ -n "$GIT_INDEX_FILE" ] && mkdir "$GIT_INDEX_FILE.gate" 2>/dev/null; then : > "$GIT_INDEX_FILE.lock"; mkdir "$GIT_INDEX_FILE.slow"; sleep 2.5; rm -f "$GIT_INDEX_FILE.lock"; fi;; esac\nexec "${realGit}" "$@"\n`,
     );
     chmodSync(join(bin, "git"), 0o755);
     process.env.PATH = `${bin}:${path}`;
