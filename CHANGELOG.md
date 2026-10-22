@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased (minor)
+## Unreleased
+
+## 0.2.0 — 2026-10-22
 
 - **Bundled Agent Skill** `edit-guard` (`/skill:edit-guard`). The model loads it on demand to explain each `edit-guard:` message and what to do, and to point you to `/undo` when you ask it to revert its work, instead of running `git checkout`, `git stash` or `git reset`. It documents every command and configuration key. The `pi` manifest declares it, so the π catalog lists the package as an extension and a skill.
 - **OpenSSF.** The README shows the OpenSSF Scorecard badge. `.github/security-insights.yml` gives the project's security facts in the OpenSSF Security Insights 2.2.0 format, validated against the official schema. `.bestpractices.json` holds the evidence for 65 of the 67 OpenSSF Best Practices "passing" criteria and 22 of the 24 Baseline level 1 controls; bestpractices.dev reads it to fill in the badge application.
