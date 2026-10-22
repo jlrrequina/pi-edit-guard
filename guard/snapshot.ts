@@ -20,6 +20,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import type { Stats } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, rmdir, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, parse as parsePath, resolve, sep, win32 } from "node:path";
@@ -330,8 +331,6 @@ export async function snapshotTree(store: Store): Promise<TreeResult> {
 
 const LINKS_MARK = "# pi-edit-guard: linked directories (Windows junctions), not followed";
 const linksFile = (store: Store) => join(store.dir, "linked-directories.json");
-/** Directories found to be real directories, per store, in this process: checked once. */
-const realDirectories = new Map<string, Set<string>>();
 
 /** The linked directories recorded for the store that are still links; the exclude file follows. */
 export async function linkedDirectories(store: Store): Promise<string[]> {
@@ -355,21 +354,21 @@ async function saveLinkedDirectories(store: Store, links: readonly string[]): Pr
 }
 
 export async function dropFollowedLinks(store: Store, names: readonly string[], known: readonly string[]): Promise<void> {
-  let real = realDirectories.get(store.dir);
-  if (!real) realDirectories.set(store.dir, (real = new Set()));
-  const found: string[] = [];
+  // Every snapshot checks every directory again: a restore or a shell can put a link where a directory
+  // was, and git keeps an entry it cannot lstat (a loop, or on a case-insensitive file system an old
+  // spelling that now leads through the link). Level by level, so nothing below a link is looked at.
+  const levels: Set<string>[] = [];
   for (const rel of names) {
-    const parts = rel.split("/");
-    for (let i = 1; i < parts.length; i++) {
-      const dir = parts.slice(0, i).join("/");
-      if (real.has(dir)) continue;
-      if (found.includes(dir)) break;
-      if ((await lstat(join(store.root, ...parts.slice(0, i))).catch(() => undefined))?.isSymbolicLink()) {
-        found.push(dir);
-        break;
-      }
-      real.add(dir);
-    }
+    let level = 0;
+    for (let i = rel.indexOf("/"); i !== -1; i = rel.indexOf("/", i + 1)) (levels[level++] ??= new Set()).add(rel.slice(0, i));
+  }
+  const found: string[] = [];
+  for (const level of levels) {
+    const dirs = [...level].filter((dir) => !found.some((link) => dir.startsWith(`${link}/`)));
+    const stats = await Promise.all(dirs.map((dir) => lstat(join(store.root, ...dir.split("/"))).catch(() => undefined)));
+    dirs.forEach((dir, i) => {
+      if (stats[i]?.isSymbolicLink()) found.push(dir);
+    });
   }
   if (!found.length) return;
   const under = names.filter((rel) => found.some((dir) => rel.startsWith(`${dir}/`)));
@@ -490,6 +489,29 @@ export async function needsJournal(store: Store, commit: string | undefined, abs
 }
 
 /**
+ * lstat of `path` as a checkpoint's tree sees it. git never follows a symlink inside the root, so
+ * there a path below a symlink or a file does not exist: following the link could loop or reach a
+ * file outside the project. undefined when the path does not exist; other errors are thrown.
+ */
+async function lstatAsTree(root: string, path: string): Promise<Stats | undefined> {
+  const missing = (err: NodeJS.ErrnoException) => {
+    if (err.code === "ENOENT" || err.code === "ENOTDIR") return undefined;
+    throw err;
+  };
+  let dir = root;
+  for (const part of insideRoot(root, path)?.split("/").slice(0, -1) ?? []) {
+    dir = join(dir, part);
+    if (!(await lstat(dir).catch(missing))?.isDirectory()) return undefined;
+  }
+  return lstat(path).catch(missing);
+}
+
+/** Whether `path` exists as a checkpoint's tree sees it; an unreadable path counts as absent. */
+function existsAsTree(root: string, path: string): Promise<boolean> {
+  return lstatAsTree(root, path).then(Boolean, () => false);
+}
+
+/**
  * Record the current state of `abs` in the checkpoint's journal, once per
  * checkpoint and path. Callers serialize calls per checkpoint.
  */
@@ -506,8 +528,9 @@ export async function journal(store: Store, session: string, c: CheckpointId, ab
   await mkdir(dir, { recursive: true, mode: 0o700 });
   let entry: JournalEntry;
   try {
-    const st = await lstat(abs);
-    if (st.isSymbolicLink()) entry = { path: abs, kind: "symlink", target: await readlink(abs) };
+    const st = await lstatAsTree(store.root, abs);
+    if (!st) entry = { path: abs, kind: "absent" };
+    else if (st.isSymbolicLink()) entry = { path: abs, kind: "symlink", target: await readlink(abs) };
     else if (st.isFile()) {
       const file = `${manifest.entries.length}.bin`;
       await copyFile(abs, join(dir, file));
@@ -616,13 +639,13 @@ async function outsideDomain(store: Store, commit: string, rels: readonly string
 const exists = (path: string) => lstat(path).then(() => true, () => false);
 
 /** The change a journal record asks for, or undefined when the path is already in that state. */
-async function fromRecord(path: string, entry: JournalEntry, dir: string): Promise<Change | undefined> {
-  if (entry.kind === "absent") return (await exists(path)) ? { op: "delete", path } : undefined;
-  if (entry.kind === "symlink") return (await readlink(path).catch(() => undefined)) === entry.target ? undefined : { op: "link", path, target: entry.target };
+async function fromRecord(root: string, path: string, entry: JournalEntry, dir: string): Promise<Change | undefined> {
+  const st = await lstatAsTree(root, path).catch(() => undefined);
+  if (entry.kind === "absent") return st ? { op: "delete", path } : undefined;
+  if (entry.kind === "symlink") return st?.isSymbolicLink() && (await readlink(path).catch(() => undefined)) === entry.target ? undefined : { op: "link", path, target: entry.target };
   const src = join(dir, entry.file);
   try {
-    const [now, then, st] = await Promise.all([readFile(path), readFile(src), lstat(path)]);
-    if (st.isFile() && (st.mode & 0o7777) === entry.mode && now.equals(then)) return undefined;
+    if (st?.isFile() && (st.mode & 0o7777) === entry.mode && (await readFile(path)).equals(await readFile(src))) return undefined;
   } catch {
     // missing or unreadable: restore it
   }
@@ -701,17 +724,17 @@ async function planRestore(store: Store, session: string, target: Checkpoint, cu
   for (const rel of candidates) {
     const path = join(store.root, rel);
     let change: Change | undefined;
-    if (!outside.has(rel)) change = (await exists(path)) ? { op: "delete", path } : undefined;
+    if (!outside.has(rel)) change = (await existsAsTree(store.root, path)) ? { op: "delete", path } : undefined;
     else {
       const record = records.get(path);
       const tree = treeRecord.get(rel);
-      if (record && (!tree || compareCheckpoints(record.checkpoint, tree) < 0)) change = await fromRecord(path, record.entry, record.dir);
+      if (record && (!tree || compareCheckpoints(record.checkpoint, tree) < 0)) change = await fromRecord(store.root, path, record.entry, record.dir);
       else if (tree) {
         const then = (await entryIn(tree.commit!, rel))!;
         const now = inCur.has(rel) ? await entryIn(cur, rel) : undefined;
         if (!now || now.oid !== then.oid || now.mode !== then.mode) change = { op: "blob", path, oid: then.oid, mode: then.mode };
       }
-      if (!change && (await exists(path))) kept.push(rel);
+      if (!change && (await existsAsTree(store.root, path))) kept.push(rel);
     }
     if (!change) continue;
     changes.push(change);
@@ -719,7 +742,7 @@ async function planRestore(store: Store, session: string, target: Checkpoint, cu
   }
   for (const [path, record] of records) {
     if (recordRel.has(path)) continue;
-    const change = await fromRecord(path, record.entry, record.dir);
+    const change = await fromRecord(store.root, path, record.entry, record.dir);
     if (!change) continue;
     changes.push(change);
     outsideTree.push(path);
@@ -801,10 +824,18 @@ async function ensureParent(root: string, path: string, checked: Set<string>): P
   }
 }
 
-/** An empty directory where a file goes is removed (git does not record empty directories); one with content is an error. */
+/** A directory in the way is removed when it holds only empty directories (git records no directories); one with other content is an error. */
 async function clearDirectory(path: string): Promise<void> {
   const st = await lstat(path).catch(() => undefined);
-  if (st?.isDirectory()) await rmdir(path).catch(() => Promise.reject(new Error("a directory with other content is in the way")));
+  if (st?.isDirectory() && !(await removeEmptyDirectories(path))) throw new Error("a directory with other content is in the way");
+}
+
+/** Remove `dir` when it holds nothing but directories that hold nothing else; true when it is gone. Never removes a file or a symlink. */
+async function removeEmptyDirectories(dir: string): Promise<boolean> {
+  for (const e of await readdir(dir, { withFileTypes: true })) {
+    if (!e.isDirectory() || !(await removeEmptyDirectories(join(dir, e.name)))) return false;
+  }
+  return retryLocked(() => rmdir(dir)).then(() => true, () => false);
 }
 
 async function replaceFile(path: string, data: Buffer | { copyFrom: string }, mode: (current: number) => number): Promise<void> {
@@ -842,9 +873,9 @@ export async function applyRestore(store: Store, plan: Plan): Promise<Applied> {
   const deletions = plan.changes.filter((c) => c.op === "delete").sort((a, b) => b.path.split(sep).length - a.path.split(sep).length || (a.path < b.path ? 1 : -1));
   for (const c of deletions) {
     try {
-      const st = await lstat(c.path).catch(() => undefined);
+      const st = await lstatAsTree(store.root, c.path).catch(() => undefined);
       if (!st) continue;
-      if (st.isDirectory()) await retryLocked(() => rmdir(c.path)).catch(() => Promise.reject(new Error("a directory with other content is in the way")));
+      if (st.isDirectory()) await clearDirectory(c.path);
       else await retryLocked(() => unlink(c.path));
       deleted++;
       for (let dir = dirname(c.path); insideRoot(store.root, dir); dir = dirname(dir)) {

@@ -237,6 +237,59 @@ for (const gitRoot of [true, false]) {
       cleanup(root, base, outside);
     }
   });
+
+  test(`${kind}: a file comes back where only empty directories are in its way`, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      const before = readTree(root);
+      const run1 = await runWith(store, 1, () => {
+        rmSync(join(root, "src/a.ts"));
+        mkdirSync(join(root, "src/a.ts/empty/deeper"), { recursive: true }); // git records no directories
+      });
+      await undo(store, run1, 1, 1);
+      assert.equal(sameTree(before, readTree(root)), undefined);
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
+  test(`${kind}: a symlink that leads to itself, then a directory in its place: the undo and its reversal are exact`, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      writeLink(root, "loop/f.txt", "f.txt"); // following it fails with ELOOP
+      const before = readTree(root);
+      const run1 = await runWith(store, 1, () => {
+        unlinkSync(join(root, "loop/f.txt"));
+        writeFile(root, "loop/f.txt/inner.txt", "now a directory\n");
+      });
+      const afterRun = readTree(root);
+      const { preUndo } = await undo(store, run1, 1, 1);
+      assert.equal(sameTree(before, readTree(root)), undefined);
+      await undo(store, preUndo, 2, 1);
+      assert.equal(sameTree(afterRun, readTree(root)), undefined);
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
+  test(`${kind}: a restore never follows a symlink inside the root: a directory swapped for a link to outside keeps the files there`, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      writeFile(outside, "elsewhere/trace.log", "a file outside the project\n");
+      const before = readTree(root);
+      const run1 = await runWith(store, 1, async (write) => {
+        await write(join(root, "src/trace.log")); // ignored and new: journaled as absent
+        writeFile(root, "src/trace.log", "agent log\n");
+        rmSync(join(root, "src"), { recursive: true });
+        symlinkSync(join(outside, "elsewhere"), join(root, "src")); // a shell swaps the directory for a link
+      });
+      await undo(store, run1, 1, 1);
+      assert.equal(readFileSync(join(outside, "elsewhere/trace.log"), "utf8"), "a file outside the project\n");
+      assert.equal(sameTree(before, readTree(root)), undefined);
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
 }
 
 test("refs live only in the private store, one per run; retention keeps the newest and prunes", async () => {
@@ -385,6 +438,24 @@ test("the restore preview says when this system cannot create the plan's symlink
   const plan = { changes: [{ op: "link" as const, path: "/root/l", target: "t" }], kept: [], skipped: [], outsideTree: [], unsupportedLinks: 1 };
   assert.match(describePlan(store, plan), /\n1 symlinks cannot be restored: Windows creates symlinks only with Developer Mode on or with administrator rights\.$/);
   assert.doesNotMatch(describePlan(store, { ...plan, unsupportedLinks: 0 }), /cannot be restored/);
+});
+
+test("a directory that a link has replaced is checked again: entries git kept below the link are dropped", async () => {
+  const { root, base, outside, store } = await setup(false);
+  try {
+    writeFile(root, "shared/data.txt", "a real directory first\n");
+    await dropFollowedLinks(store, ["shared/data.txt"], []);
+    rmSync(join(root, "shared"), { recursive: true });
+    writeFile(outside, "shared/data.txt", "behind the link\n");
+    symlinkSync(join(outside, "shared"), join(root, "shared"), "junction"); // a restore or a shell puts a link there
+    // an entry git keeps although its path now leads through the link (a loop, a case alias, a junction)
+    const oid = (await runGit(store, ["hash-object", "-w", "--stdin"], { input: "behind the link\n" })).stdout.toString().trim();
+    await runGit(store, ["update-index", "--add", "--cacheinfo", `100644,${oid},shared/data.txt`]);
+    await dropFollowedLinks(store, ["shared/data.txt"], []);
+    assert.ok(!(await runGit(store, ["ls-files"])).stdout.toString().includes("shared/"), "the entry below the link is dropped");
+  } finally {
+    cleanup(root, base, outside);
+  }
 });
 
 test("a directory git reached through a link (Git for Windows follows junctions) is dropped and excluded, until a real directory takes its place", async () => {
