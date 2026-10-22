@@ -107,8 +107,9 @@ test("README: badges, cover, FAQ and links; a relative link points only at a pub
   // ci.yml runs on pull requests; on main, CI runs inside the Release workflow, so its status is the one to show.
   const ci = badges.get("CI")!.image;
   assert.deepEqual([ci.host, ci.pathname, ci.searchParams.get("branch")], ["img.shields.io", "/github/actions/workflow/status/jlrrequina/pi-edit-guard/release.yml", "main"]);
-  assert.ok(readme.includes(`](${pkg.pi.image})`), "the README shows the catalog image");
-  assert.ok(readme.includes(SITE) && readme.includes("(llms.txt)") && readme.includes("/skill:edit-guard"));
+  const targets = [...readme.matchAll(/\]\(([^)\s]+)\)|<(https:[^>\s]+)>/g)].map((m) => m[1] ?? m[2]!);
+  for (const [target, what] of [[pkg.pi.image, "the catalog image"], [SITE, "the site"], ["llms.txt", "llms.txt"]]) assert.ok(targets.some((t) => t === target), `the README links ${what}`);
+  assert.ok(readme.includes("/skill:edit-guard"));
   assert.ok(readmeFaq().length >= 5, "an FAQ");
   // npm resolves relative links against the repository, but the π catalog resolves them against the published
   // tarball (cdn.jsdelivr.net/npm/<package>@<version>/...): a file outside "files" is a broken link there.
