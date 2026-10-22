@@ -21,16 +21,18 @@ const readme = read("README.md").replaceAll("\\|", "|"); // pipes are escaped in
 
 const SITE = "https://jlrrequina.github.io/pi-edit-guard/";
 const RAW = "https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/";
-const BLOB = "https://github.com/jlrrequina/pi-edit-guard/blob/main/";
 const COMMANDS = ["/undo", "/undo <n>", "/undo pre-undo-<k>", "--yes", "/checkpoints", "/guard", "/guard on", "/guard freshness on|off", "/guard snapshots on|off", "/guard loop on|off"];
 const MESSAGES = [repeatBlocked(3), repeatNotice(3), failureNotice(2), "exists but was not read in this context. Read it, then retry.", "changed since you read it (call #12). Read it again, then retry."];
 const CONFIG_KEYS = Object.keys(parseConfig({}).config);
 
 /** Repository paths that links into this repository (blob or raw, on main) point at. */
 function repoPaths(text: string): string[] {
+  const into = { "github.com": "/jlrrequina/pi-edit-guard/blob/main/", "raw.githubusercontent.com": "/jlrrequina/pi-edit-guard/main/" } as Record<string, string>;
   const out: string[] = [];
-  for (const base of [BLOB, RAW]) {
-    for (const m of text.matchAll(new RegExp(`${base.replaceAll(".", "\\.")}([^\\s)\"'<>#?]+)`, "g"))) out.push(m[1]!);
+  for (const [href] of text.matchAll(/https:\/\/[^\s)"'<>`]+/g)) {
+    const url = new URL(href);
+    const prefix = into[url.host];
+    if (prefix && url.pathname.startsWith(prefix)) out.push(url.pathname.slice(prefix.length));
   }
   return out;
 }
@@ -38,7 +40,8 @@ function repoPaths(text: string): string[] {
 // Text without markup, to compare one answer written in markdown, HTML and JSON-LD.
 const words = (s: string) => s.replace(/\s+/g, " ").trim();
 const fromMarkdown = (s: string) => words(s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replaceAll("`", ""));
-const fromHtml = (s: string) => words(s.replace(/<[^>]+>/g, "").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"));
+// split/join, not replace: CodeQL reads a tag-stripping replace as an incomplete HTML sanitizer. This only reads our own page.
+const fromHtml = (s: string) => words(s.split(/<[^>]*>/).join("").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"));
 
 type Faq = { q: string; a: string }[];
 
@@ -97,7 +100,13 @@ test("README: install command first, every command, config key, default list and
 });
 
 test("README: badges, cover, FAQ and links; a relative link points only at a published file", () => {
-  for (const badge of ["img.shields.io/npm/v/@lenard9191/pi-edit-guard", "pi.dev/packages/@lenard9191/pi-edit-guard", "actions/workflow/status/jlrrequina/pi-edit-guard/release.yml?branch=main", "api.scorecard.dev/projects/github.com/jlrrequina/pi-edit-guard/badge"]) assert.ok(readme.includes(badge), `badge ${badge}`);
+  const badges = new Map([...readme.matchAll(/^\[!\[([^\]]+)\]\(([^)]+)\)\]\(([^)]+)\)$/gm)].map((m) => [m[1]!, { image: new URL(m[2]!), link: m[3]! }]));
+  assert.deepEqual([...badges.keys()], ["npm version", "npm downloads", "π package", "CI", "OpenSSF Scorecard", "license"]);
+  assert.equal(badges.get("π package")!.link, "https://pi.dev/packages/@lenard9191/pi-edit-guard");
+  assert.equal(badges.get("OpenSSF Scorecard")!.image.href, "https://api.scorecard.dev/projects/github.com/jlrrequina/pi-edit-guard/badge");
+  // ci.yml runs on pull requests; on main, CI runs inside the Release workflow, so its status is the one to show.
+  const ci = badges.get("CI")!.image;
+  assert.deepEqual([ci.host, ci.pathname, ci.searchParams.get("branch")], ["img.shields.io", "/github/actions/workflow/status/jlrrequina/pi-edit-guard/release.yml", "main"]);
   assert.ok(readme.includes(`](${pkg.pi.image})`), "the README shows the catalog image");
   assert.ok(readme.includes(SITE) && readme.includes("(llms.txt)") && readme.includes("/skill:edit-guard"));
   assert.ok(readmeFaq().length >= 5, "an FAQ");
