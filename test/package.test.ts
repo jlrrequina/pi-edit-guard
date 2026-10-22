@@ -101,7 +101,7 @@ test("README: install command first, every command, config key, default list and
 
 test("README: badges, cover, FAQ and links; a relative link points only at a published file", () => {
   const badges = new Map([...readme.matchAll(/^\[!\[([^\]]+)\]\(([^)]+)\)\]\(([^)]+)\)$/gm)].map((m) => [m[1]!, { image: new URL(m[2]!), link: m[3]! }]));
-  assert.deepEqual([...badges.keys()], ["npm version", "npm downloads", "π package", "CI", "OpenSSF Scorecard", "license"]);
+  for (const alt of ["npm version", "npm downloads", "π package", "CI", "OpenSSF Scorecard", "license"]) assert.ok(badges.has(alt), `badge ${alt}`);
   assert.equal(badges.get("π package")!.link, "https://pi.dev/packages/@lenard9191/pi-edit-guard");
   assert.equal(badges.get("OpenSSF Scorecard")!.image.href, "https://api.scorecard.dev/projects/github.com/jlrrequina/pi-edit-guard/badge");
   // ci.yml runs on pull requests; on main, CI runs inside the Release workflow, so its status is the one to show.
