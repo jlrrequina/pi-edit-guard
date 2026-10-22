@@ -1,0 +1,154 @@
+# OpenSSF Security Insights (https://security-insights.openssf.org): this project's security
+# facts in a machine-readable form. Validate after a change:
+#   cue vet -d '#SecurityInsights' schema.cue .github/security-insights.yml
+# with schema.cue from https://github.com/ossf/security-insights/blob/main/spec/schema.cue
+header:
+  schema-version: 2.2.0
+  last-updated: '2026-10-23'
+  last-reviewed: '2026-10-23'
+  url: https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/.github/security-insights.yml
+  comment: pi-edit-guard is one repository; this file holds both the project and the repository section.
+
+project:
+  name: pi-edit-guard
+  homepage: https://jlrrequina.github.io/pi-edit-guard/
+  administrators:
+    - name: John Lenard Requina
+      social: https://github.com/jlrrequina
+      primary: true
+  documentation:
+    quickstart-guide: https://github.com/jlrrequina/pi-edit-guard#readme
+    detailed-guide: https://github.com/jlrrequina/pi-edit-guard#how-it-works
+    release-process: https://github.com/jlrrequina/pi-edit-guard/blob/main/.github/workflows/release.yml
+    support-policy: https://github.com/jlrrequina/pi-edit-guard/blob/main/SECURITY.md
+    signature-verification: https://github.com/jlrrequina/pi-edit-guard/blob/main/SECURITY.md#verifying-a-release
+  repositories:
+    - name: pi-edit-guard
+      url: https://github.com/jlrrequina/pi-edit-guard
+      comment: The extension, its tests and its release workflow.
+  vulnerability-reporting:
+    reports-accepted: true
+    bug-bounty-available: false
+    policy: https://github.com/jlrrequina/pi-edit-guard/blob/main/SECURITY.md
+    contact:
+      name: John Lenard Requina, through GitHub private vulnerability reporting
+      social: https://github.com/jlrrequina/pi-edit-guard/security/advisories/new
+      primary: true
+    in-scope:
+      - writes into a project or its .git
+      - a restore with the wrong content
+      - a restore that follows a symlink out of the project
+      - disclosure of the snapshot store, which can hold copies of ignored files such as .env
+      - a write that the freshness rule should block
+    comment: Report privately; the first response comes within 7 days. Fixes ship as a patch release.
+
+repository:
+  url: https://github.com/jlrrequina/pi-edit-guard
+  status: active
+  accepts-change-request: true
+  accepts-automated-change-request: true
+  core-team:
+    - name: John Lenard Requina
+      social: https://github.com/jlrrequina
+      primary: true
+  license:
+    url: https://github.com/jlrrequina/pi-edit-guard/blob/main/LICENSE
+    expression: MIT
+  documentation:
+    contributing-guide: https://github.com/jlrrequina/pi-edit-guard/blob/main/CONTRIBUTING.md
+    security-policy: https://github.com/jlrrequina/pi-edit-guard/blob/main/SECURITY.md
+  release:
+    automated-pipeline: true
+    changelog: https://github.com/jlrrequina/pi-edit-guard/blob/main/CHANGELOG.md
+    distribution-points:
+      - uri: pkg:npm/%40lenard9191/pi-edit-guard
+        comment: The npm package, published only by the Release workflow with trusted publishing (no npm token).
+      - uri: https://github.com/jlrrequina/pi-edit-guard/releases
+        comment: Immutable GitHub releases with the same tarball and its provenance bundle.
+    license:
+      url: https://github.com/jlrrequina/pi-edit-guard/blob/main/LICENSE
+      expression: MIT
+    attestations:
+      - name: npm provenance
+        location: https://www.npmjs.com/package/@lenard9191/pi-edit-guard
+        predicate-uri: https://slsa.dev/provenance/v1
+        comment: Check it with npm audit signatures in a project that installed the package.
+      - name: Build provenance of the release tarball
+        location: https://github.com/jlrrequina/pi-edit-guard/releases
+        predicate-uri: https://slsa.dev/provenance/v1
+        comment: Attached to each release as <tarball>.intoto.jsonl (Sigstore bundle); check it with gh attestation verify.
+  security:
+    assessments:
+      self:
+        comment: No formal self-assessment exists. The README's Guarantees, Coverage and Secrets sections and the scope in SECURITY.md state what the extension protects and what it does not.
+    tools:
+      - name: CodeQL
+        type: SAST
+        rulesets:
+          - security-and-quality
+        integration:
+          adhoc: false
+          ci: true
+          release: false
+        results: {}
+        comment: JavaScript/TypeScript and GitHub Actions, on every push to main, every pull request and weekly.
+      - name: zizmor
+        type: SAST
+        rulesets:
+          - default
+        integration:
+          adhoc: false
+          ci: true
+          release: false
+        results: {}
+        comment: Audits the GitHub Actions workflows in CI, with actionlint.
+      - name: Dependency review
+        type: SCA
+        rulesets:
+          - default
+        integration:
+          adhoc: false
+          ci: true
+          release: false
+        results: {}
+        comment: Fails a pull request that adds a dependency with a known vulnerability of moderate or higher severity.
+      - name: Dependabot
+        type: SCA
+        rulesets:
+          - default
+        integration:
+          adhoc: true
+          ci: false
+          release: false
+        results: {}
+        comment: Security alerts and weekly update pull requests for npm and GitHub Actions, with a 7-day cooldown.
+      - name: GitHub secret scanning
+        type: secret
+        rulesets:
+          - default
+        integration:
+          adhoc: true
+          ci: true
+          release: false
+        results: {}
+        comment: Push protection is on.
+      - name: fast-check
+        type: fuzzing
+        rulesets:
+          - default
+        integration:
+          adhoc: false
+          ci: true
+          release: true
+        results: {}
+        comment: Property-based tests of snapshot and restore (300 random trees and mutations per run); they also run in the publish job.
+      - name: OpenSSF Scorecard
+        type: other
+        rulesets:
+          - default
+        integration:
+          adhoc: true
+          ci: true
+          release: false
+        results: {}
+        comment: On every push to main and weekly; results at https://scorecard.dev/viewer/?uri=github.com/jlrrequina/pi-edit-guard

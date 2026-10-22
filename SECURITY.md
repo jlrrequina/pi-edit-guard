@@ -4,7 +4,7 @@
 
 Report it privately at <https://github.com/jlrrequina/pi-edit-guard/security/advisories/new> (**Security → Report a vulnerability**). Please do not open a public issue.
 
-Expect a first response within 7 days. Fixes ship as a patch release, and the advisory is published once the fix is on npm. Only the latest release is supported.
+Expect a first response within 7 days. Fixes ship as a patch release, and the advisory is published once the fix is on npm; the notes of that release name the advisory and its CVE. Only the latest release is supported.
 
 In scope: anything that makes the extension write into a project or its `.git`, restore the wrong content, follow a symlink out of the project during a restore, leak the contents of its store (which can hold copies of ignored files such as `.env`), or let a write through that the freshness rule should block.
 

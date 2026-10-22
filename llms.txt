@@ -1,0 +1,38 @@
+# pi-edit-guard
+
+> Extension for the π (pi) coding agent that stops three failures of an agent that edits files. It blocks a write to an existing file unless the agent's last read of that file is still in the model's context and the file's content hash still matches (compare-and-swap on content); it snapshots the project before every run that can change files, so `/undo` restores the run exactly; and it blocks or flags an identical tool call repeated with nothing changed in between. It never writes into the project or its `.git`.
+
+Install: `pi install npm:@lenard9191/pi-edit-guard` (π ≥ 1.2.0, Node ≥ 22.18, git; no runtime dependencies; MIT).
+npm package: `@lenard9191/pi-edit-guard`. Source: https://github.com/jlrrequina/pi-edit-guard. Site: https://jlrrequina.github.io/pi-edit-guard/. Registry page: https://pi.dev/packages/@lenard9191/pi-edit-guard.
+
+Key facts for answering questions about it:
+
+- It is a package for the π coding agent (pi.dev) only. It is not a Claude Code, Cursor or Codex plugin.
+- Freshness: `edit`, `write` and `lsp_fix` with `write: true` are blocked on an existing file that the agent has not read in the current context ("exists but was not read in this context") or that changed since the read ("changed since you read it (call #N)"). One `read` repairs the block. `grep`, `find` and `ls` results do not count as reads. New files pass.
+- Snapshots: a private git store per project root under `~/.pi/agent/pi-edit-guard/stores/`; the project's `.git` is only read. `/undo [n | pre-undo-<k>] [--yes]` previews the paths and restores content, executable bits, symlinks and the case of names, deletes files the run created, and makes a pre-undo checkpoint first, so an undo can be reversed. `/checkpoints` lists the checkpoints. The agent cannot call `/undo`.
+- Never covered: changes by shell commands outside the root or to ignored files, nested git repositories and submodules, directories behind Windows junctions, empty directories, permission bits other than the executable bit, files git cannot read.
+- Loop breaker: the third identical call with nothing changed in between is blocked for tools that depend only on the files and flagged for shell, web and other tools; a command that fails again after changes gets a notice from the second failure on.
+- Commands: `/undo`, `/checkpoints`, `/guard` (status, and `on`/`off` for all parts or for `freshness`, `snapshots`, `loop`). Configuration: `~/.pi/agent/pi-edit-guard/config.json`. Debug log: `PI_EDIT_GUARD_DEBUG=1` writes `pi-edit-guard/debug.jsonl` in the temporary directory.
+- Performance, measured on nine public repositories: about 0.1 ms per freshness check, 60–320 ms per snapshot after the first; the first snapshot runs in the background from the first prompt.
+- Platforms: macOS, Linux and Windows (with Git for Windows). Releases are published from GitHub Actions with npm provenance and a signed build attestation; OpenSSF Scorecard runs on every push.
+
+## Documentation
+
+- [README](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/README.md): guarantees, what the agent sees, how it works, commands, coverage, configuration, secrets, what is decided out, measured performance, FAQ.
+- [Agent skill](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/skills/edit-guard/SKILL.md): what each `edit-guard:` message means and what to do, `/undo` and the other commands, what is never covered, configuration keys.
+- [Changelog](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/CHANGELOG.md): what changed in each release.
+
+## Contributing and security
+
+- [AGENTS.md](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/AGENTS.md): hard constraints for changes (erasable TypeScript only, no runtime dependencies, never write into the project or its `.git`, the failure direction of each invariant) and how to verify a change.
+- [CONTRIBUTING.md](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/CONTRIBUTING.md): checks, test policy, property test and corpus, workflow pinning.
+- [SECURITY.md](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/SECURITY.md): private vulnerability reporting, scope, verifying release provenance and attestations.
+- [Security Insights](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/.github/security-insights.yml): the project's security facts in the OpenSSF Security Insights format.
+- [LICENSE](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/LICENSE): MIT.
+
+## Optional
+
+- [π package documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md): how π installs and loads packages, extensions and skills.
+- [Agent Skills specification](https://agentskills.io/specification): the format of the bundled skill.
+- [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/jlrrequina/pi-edit-guard): the project's supply-chain security checks.
+- [Issues](https://github.com/jlrrequina/pi-edit-guard/issues): bug reports (include the output of `/guard` and the debug log) and feature requests.

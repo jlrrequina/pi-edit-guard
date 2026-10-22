@@ -30,7 +30,7 @@ const walk = (rel = "") => {
   }
 };
 walk();
-const expected = ["index.ts", "config.ts", "guard/paths.ts", "guard/state.ts", "guard/freshness.ts", "guard/snapshot.ts", "guard/loop.ts", "package.json", "README.md", "CHANGELOG.md", "LICENSE"];
+const expected = ["index.ts", "config.ts", "guard/paths.ts", "guard/state.ts", "guard/freshness.ts", "guard/snapshot.ts", "guard/loop.ts", "skills/edit-guard/SKILL.md", "llms.txt", "package.json", "README.md", "CHANGELOG.md", "LICENSE"];
 const missing = expected.filter((f) => !packed.includes(f));
 const unexpected = packed.filter((f) => !expected.includes(f));
 if (missing.length || unexpected.length) fail(`packed files — missing: ${JSON.stringify(missing)}, unexpected: ${JSON.stringify(unexpected)}`);

@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-edit-guard: /undo and stale-edit protection for the π coding agent</title>
+<meta name="description" content="π (pi) coding-agent extension: blocks edits to files that changed since the agent read them, snapshots each run so /undo restores it, and stops loops.">
+<link rel="canonical" href="https://jlrrequina.github.io/pi-edit-guard/">
+<link rel="alternate" type="text/plain" href="https://jlrrequina.github.io/pi-edit-guard/llms.txt" title="llms.txt">
+<link rel="sitemap" type="application/xml" href="https://jlrrequina.github.io/pi-edit-guard/sitemap.xml">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b0e14">
+<meta name="author" content="John Lenard Requina">
+<meta name="keywords" content="pi coding agent, π, pi extension, pi package, undo, checkpoints, snapshots, rollback, stale edit, compare-and-swap, loop detection, doom loop, coding agent safety, guardrails">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="pi-edit-guard">
+<meta property="og:title" content="pi-edit-guard — exact /undo, stale-edit protection and a loop breaker for the π coding agent">
+<meta property="og:description" content="Blocks edits to files that changed since the π agent read them, snapshots the project before each run so /undo restores it exactly, and stops repeated identical tool calls. Nothing is written into your repo.">
+<meta property="og:url" content="https://jlrrequina.github.io/pi-edit-guard/">
+<meta property="og:image" content="https://jlrrequina.github.io/pi-edit-guard/cover.png">
+<meta property="og:image:width" content="2560">
+<meta property="og:image:height" content="1280">
+<meta property="og:image:alt" content="A stale edit blocked, a repeated call stopped, and /undo restoring the state before a run">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="pi-edit-guard — exact /undo, stale-edit protection and a loop breaker for the π coding agent">
+<meta name="twitter:description" content="Blocks stale edits, snapshots every run so /undo restores it exactly, and stops repeated identical tool calls in the π coding agent.">
+<meta name="twitter:image" content="https://jlrrequina.github.io/pi-edit-guard/cover.png">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://jlrrequina.github.io/pi-edit-guard/#software",
+      "name": "pi-edit-guard",
+      "alternateName": "@lenard9191/pi-edit-guard",
+      "description": "Extension for the π (pi) coding agent that blocks a write to a file the agent has not read as it is now (compare-and-swap on content), snapshots the project before every run that can change files so /undo restores it exactly, and blocks or flags a repeated identical tool call with nothing changed in between. It never writes into the project or its .git.",
+      "url": "https://jlrrequina.github.io/pi-edit-guard/",
+      "applicationCategory": "DeveloperApplication",
+      "applicationSubCategory": "Coding agent extension",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareRequirements": "π coding agent >= 1.2.0, Node.js >= 22.18, git",
+      "downloadUrl": "https://www.npmjs.com/package/@lenard9191/pi-edit-guard",
+      "installUrl": "https://pi.dev/packages/@lenard9191/pi-edit-guard",
+      "license": "https://opensource.org/license/mit",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "image": "https://jlrrequina.github.io/pi-edit-guard/cover.png",
+      "screenshot": "https://jlrrequina.github.io/pi-edit-guard/cover.png",
+      "author": { "@type": "Person", "name": "John Lenard Requina", "url": "https://github.com/jlrrequina" },
+      "keywords": "pi coding agent, pi extension, undo, checkpoints, snapshots, stale edit, compare-and-swap, loop detection, guardrails",
+      "sameAs": [
+        "https://github.com/jlrrequina/pi-edit-guard",
+        "https://www.npmjs.com/package/@lenard9191/pi-edit-guard",
+        "https://pi.dev/packages/@lenard9191/pi-edit-guard"
+      ]
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "@id": "https://jlrrequina.github.io/pi-edit-guard/#source",
+      "name": "pi-edit-guard",
+      "codeRepository": "https://github.com/jlrrequina/pi-edit-guard",
+      "programmingLanguage": "TypeScript",
+      "runtimePlatform": "Node.js",
+      "license": "https://opensource.org/license/mit",
+      "targetProduct": { "@id": "https://jlrrequina.github.io/pi-edit-guard/#software" }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://jlrrequina.github.io/pi-edit-guard/#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Does it work with Claude Code, Cursor or Codex?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. It is an extension for the π coding agent only: it works through π's extension API (tool-call events, session entries and commands)." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does it write into my project or its .git?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. Its state lives under ~/.pi/agent/pi-edit-guard/. The project's .git is only read (rev-parse, ls-files): your commits, index, branches and stash are never touched. Only /undo writes project files, and only the ones that differ." }
+        },
+        {
+          "@type": "Question",
+          "name": "How is /undo different from git checkout or git stash?",
+          "acceptedAnswer": { "@type": "Answer", "text": "/undo restores the state before an agent run: every file git sees in the project (tracked, and untracked but not ignored), the ignored files a write tool changed, executable bits, symlinks and the case of names. Files the run created are deleted. It shows the paths first, touches only those, and leaves your commits, index, branches and stash alone. It takes a pre-undo checkpoint first, so /undo pre-undo-<k> reverses it." }
+        },
+        {
+          "@type": "Question",
+          "name": "Why was the agent's edit blocked?",
+          "acceptedAnswer": { "@type": "Answer", "text": "The file is not as the agent last read it: the agent did not read it in the current context, or its content changed since (you, a formatter or another agent edited it). One read repairs it. The block exists so that the agent never overwrites a change it has not seen." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does it slow the agent down?",
+          "acceptedAnswer": { "@type": "Answer", "text": "The freshness check takes about 0.1 ms per write. A snapshot after the first takes 60–320 ms on nine public repositories, from express to symfony. The first snapshot of a project runs in the background from the session's first prompt." }
+        },
+        {
+          "@type": "Question",
+          "name": "Can the agent undo its own changes?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. /undo is a command for you, because throwing away changes in the working tree is your decision. The agent reverts its own work with edits. The bundled skill tells the agent to point you to /undo instead of running git checkout, git stash or git reset." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does it work on Windows?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes, with Git for Windows, which π needs for its bash tool. CI runs every test on Windows, macOS and Linux. On Windows, a symlink can be restored only with Developer Mode on or with administrator rights." }
+        }
+      ]
+    }
+  ]
+}
+</script>
+
+<style>
+  :root { color-scheme: light dark; --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --code: #f6f8fa; --accent: #1f883d; --link: #0969da; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0e14; --fg: #e6edf3; --muted: #8b949e; --line: #30363d; --code: #161b22; --accent: #7ee787; --link: #79c0ff; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 20px 64px; }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 .5rem; letter-spacing: -.02em; }
+  h1 .pi { color: var(--accent); }
+  h2 { font-size: 1.35rem; margin: 2.4rem 0 .8rem; padding-top: .4rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 .4rem; }
+  p.lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 1.2rem; }
+  a { color: var(--link); }
+  code, pre { font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; font-size: .92em; }
+  code { background: var(--code); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  .install { font-size: 1.05rem; margin: 1rem 0 1.4rem; }
+  .links { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; margin: 0 0 1.6rem; padding: 0; list-style: none; color: var(--muted); }
+  img.cover { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 10px; margin: .4rem 0 1.2rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  td:first-child { white-space: nowrap; }
+  ul { padding-left: 1.3rem; }
+  li { margin: .25rem 0; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .92rem; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><span class="pi">π</span> pi-edit-guard</h1>
+    <p class="lead">Exact <code>/undo</code>, stale-edit protection and a loop breaker for the <a href="https://pi.dev">π (pi) coding agent</a>. The extension blocks edits to files that changed since the agent read them, snapshots the project before each run so <code>/undo</code> restores it exactly, and stops repeated identical tool calls. Nothing is written into your project or its <code>.git</code>.</p>
+    <pre class="install"><code>pi install npm:@lenard9191/pi-edit-guard</code></pre>
+    <ul class="links">
+      <li><a href="https://github.com/jlrrequina/pi-edit-guard">GitHub</a></li>
+      <li><a href="https://www.npmjs.com/package/@lenard9191/pi-edit-guard">npm</a></li>
+      <li><a href="https://pi.dev/packages/@lenard9191/pi-edit-guard">π package catalog</a></li>
+      <li><a href="https://github.com/jlrrequina/pi-edit-guard/blob/main/CHANGELOG.md">Changelog</a></li>
+      <li><a href="https://scorecard.dev/viewer/?uri=github.com/jlrrequina/pi-edit-guard">OpenSSF Scorecard</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+    </ul>
+    <img class="cover" src="cover.png" width="2560" height="1280" alt="Two terminal panels: on the left, the agent's stale edit blocked, a repeated grep stopped and a failing test run flagged; on the right, /undo previewing and restoring the state before run 3" loading="eager" fetchpriority="high">
+  </header>
+
+  <section id="what">
+    <h2>What it does</h2>
+    <ul>
+      <li><strong>Freshness</strong> — a write to an existing file needs a read of that file, still in the model's context, whose content hash still matches the disk (compare-and-swap on content). An unread or changed file is blocked; one <code>read</code> repairs it. Paths resolve exactly as π's tools resolve them, through symlinks.</li>
+      <li><strong>Snapshots and <code>/undo</code></strong> — before the first call of a run that can change files, the project is snapshotted into a private git store under <code>~/.pi/agent/pi-edit-guard/</code>. <code>/undo</code> previews the paths and restores content, executable bits, symlinks and the case of names exactly, deletes files the run created, and can itself be reversed.</li>
+      <li><strong>Loop breaker</strong> — the third identical call with nothing changed in between is blocked for tools that depend only on the files, and flagged for shell, web and other tools. A command that fails again after changes gets a notice to stop and re-think.</li>
+    </ul>
+    <p>The project's <code>.git</code> is only read. Requires π ≥ 1.2.0, Node ≥ 22.18 and git; no runtime dependencies; MIT. Tested on macOS, Linux and Windows.</p>
+  </section>
+
+  <section id="example">
+    <h2>What the agent sees</h2>
+<pre><code>edit-guard: src/app.ts exists but was not read in this context. Read it, then retry.
+edit-guard: src/app.ts changed since you read it (call #12). Read it again, then retry.
+edit-guard: identical call #3 with no change in between; the result would be identical. Change the input or the state first.
+edit-guard: this command failed 2 times after changes. Stop. Re-read the relevant code top-down, state which assumption was wrong, and choose a different approach before the next edit.</code></pre>
+  </section>
+
+  <section id="commands">
+    <h2>Commands</h2>
+    <table>
+      <tbody>
+        <tr><td><code>/undo</code></td><td>restore the files to the state before the latest run that changed something; shows the paths that change and asks first</td></tr>
+        <tr><td><code>/undo &lt;n&gt;</code></td><td>the state before run <code>n</code> of this session</td></tr>
+        <tr><td><code>/undo pre-undo-&lt;k&gt;</code></td><td>reverse undo <code>k</code></td></tr>
+        <tr><td><code>/checkpoints</code></td><td>this session's checkpoints and how many paths differ from now</td></tr>
+        <tr><td><code>/guard</code></td><td>status and coverage; <code>/guard on|off</code> and <code>/guard freshness|snapshots|loop on|off</code> switch parts for the session</td></tr>
+      </tbody>
+    </table>
+    <p>The package also ships an <a href="https://agentskills.io">Agent Skill</a> (<code>/skill:edit-guard</code>) that the model loads on demand to explain the guard's messages and to point you to <code>/undo</code> when you ask it to revert its work. Full reference: <a href="https://github.com/jlrrequina/pi-edit-guard#readme">README</a>.</p>
+  </section>
+
+  <section id="performance">
+    <h2>Performance</h2>
+    <p>Measured on nine public repositories (express, flask, ripgrep, cobra, git, rails, django, react, symfony): the freshness check takes about 0.1 ms per write; a snapshot after the first takes 60–320 ms; an <code>/undo</code> of about 100 changed paths takes 0.2–0.9 s. The first snapshot of a project (0.1–5.6 s) runs in the background from the session's first prompt. Method and numbers: <a href="https://github.com/jlrrequina/pi-edit-guard#performance">README</a>.</p>
+  </section>
+
+  <section id="faq">
+    <h2>FAQ</h2>
+    <h3>Does it work with Claude Code, Cursor or Codex?</h3>
+    <p>No. It is an extension for the π coding agent only: it works through π's extension API (tool-call events, session entries and commands).</p>
+    <h3>Does it write into my project or its .git?</h3>
+    <p>No. Its state lives under <code>~/.pi/agent/pi-edit-guard/</code>. The project's <code>.git</code> is only read (<code>rev-parse</code>, <code>ls-files</code>): your commits, index, branches and stash are never touched. Only <code>/undo</code> writes project files, and only the ones that differ.</p>
+    <h3>How is /undo different from git checkout or git stash?</h3>
+    <p><code>/undo</code> restores the state before an agent run: every file git sees in the project (tracked, and untracked but not ignored), the ignored files a write tool changed, executable bits, symlinks and the case of names. Files the run created are deleted. It shows the paths first, touches only those, and leaves your commits, index, branches and stash alone. It takes a pre-undo checkpoint first, so <code>/undo pre-undo-&lt;k&gt;</code> reverses it.</p>
+    <h3>Why was the agent's edit blocked?</h3>
+    <p>The file is not as the agent last read it: the agent did not read it in the current context, or its content changed since (you, a formatter or another agent edited it). One <code>read</code> repairs it. The block exists so that the agent never overwrites a change it has not seen.</p>
+    <h3>Does it slow the agent down?</h3>
+    <p>The freshness check takes about 0.1 ms per write. A snapshot after the first takes 60–320 ms on nine public repositories, from express to symfony. The first snapshot of a project runs in the background from the session's first prompt.</p>
+    <h3>Can the agent undo its own changes?</h3>
+    <p>No. <code>/undo</code> is a command for you, because throwing away changes in the working tree is your decision. The agent reverts its own work with edits. The bundled skill tells the agent to point you to <code>/undo</code> instead of running <code>git checkout</code>, <code>git stash</code> or <code>git reset</code>.</p>
+    <h3>Does it work on Windows?</h3>
+    <p>Yes, with Git for Windows, which π needs for its bash tool. CI runs every test on Windows, macOS and Linux. On Windows, a symlink can be restored only with Developer Mode on or with administrator rights.</p>
+  </section>
+
+  <footer>
+    <p>MIT © John Lenard Requina · <a href="https://github.com/jlrrequina/pi-edit-guard">Source</a> · <a href="https://github.com/jlrrequina/pi-edit-guard/blob/main/SECURITY.md">Security policy</a> · <a href="https://github.com/jlrrequina/pi-edit-guard/issues">Issues</a> · Releases are published from GitHub Actions with npm provenance and a signed build attestation.</p>
+  </footer>
+</main>
+</body>
+</html>

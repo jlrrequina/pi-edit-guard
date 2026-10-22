@@ -1,0 +1,55 @@
+name: Pages
+
+# Publishes the landing site (docs/site) with llms.txt and the cover image to
+# https://jlrrequina.github.io/pi-edit-guard/. Static files only: no build step.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/site/**
+      - docs/cover.png
+      - llms.txt
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: assemble the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          cp docs/site/index.html docs/site/sitemap.xml docs/cover.png llms.txt _site/
+          touch _site/.nojekyll
+          ls -la _site
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pages: write # deploy the artifact to GitHub Pages
+      id-token: write # OIDC token that actions/deploy-pages presents to the Pages service
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

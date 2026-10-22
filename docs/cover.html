@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Source of docs/cover.png (the π catalog image, README image and og:image): render at 1280x640 with deviceScaleFactor 2. -->
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { width: 1280px; height: 640px; background: #0b0e14; font-family: "SF Mono", Menlo, Consolas, monospace; color: #c9d1d9; overflow: hidden; }
+  .wrap { padding: 34px 40px; height: 100%; display: flex; flex-direction: column; gap: 22px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; }
+  h1 { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 40px; font-weight: 700; color: #e6edf3; letter-spacing: -0.5px; }
+  h1 .pi { color: #7ee787; }
+  .tag { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 20px; color: #8b949e; }
+  .panels { display: grid; grid-template-columns: 1.2fr 1fr; gap: 22px; flex: 1; min-height: 0; }
+  .term { background: #0d1117; border: 1px solid #30363d; border-radius: 12px; padding: 20px 22px; font-size: 17px; line-height: 1.66; overflow: hidden; }
+  .bar { display: flex; gap: 7px; margin-bottom: 12px; }
+  .bar i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .t { color: #8b949e; font-size: 13px; margin-left: 10px; }
+  .k { color: #79c0ff; }
+  .c { color: #ffa657; }
+  .dim { color: #6e7681; }
+  .red { color: #ff7b72; }
+  .green { color: #7ee787; }
+  .amber { color: #e3b341; }
+  .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gap { height: 14px; }
+  footer { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 18px; color: #8b949e; display: flex; justify-content: space-between; }
+  footer b { color: #e6edf3; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="pi">π</span> edit-guard</h1>
+    <div class="tag">no stale writes · every run undoable · no loops</div>
+  </header>
+  <div class="panels">
+    <div class="term">
+      <div class="bar"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i><span class="t">the agent's tool calls</span></div>
+      <div class="line"><span class="k">edit</span> src/cart.ts</div>
+      <div class="line"><span class="red">edit-guard:</span> src/cart.ts changed since you read it</div>
+      <div class="line">&nbsp;&nbsp;(call #12). Read it again, then retry.</div>
+      <div class="line"><span class="k">read</span> src/cart.ts</div>
+      <div class="line"><span class="k">edit</span> src/cart.ts <span class="green">✓</span></div>
+      <div class="gap"></div>
+      <div class="line"><span class="k">grep</span> <span class="c">"applyDiscount"</span> src/ <span class="dim">— third time, nothing changed</span></div>
+      <div class="line"><span class="amber">edit-guard:</span> identical call #3 with no change in</div>
+      <div class="line">&nbsp;&nbsp;between; the result would be identical.</div>
+      <div class="gap"></div>
+      <div class="line"><span class="k">bash</span> npm test <span class="red">✗</span> <span class="dim">— fails again after edits</span></div>
+      <div class="line"><span class="amber">edit-guard:</span> this command failed 2 times after</div>
+      <div class="line">&nbsp;&nbsp;changes. Stop. Re-read the relevant code …</div>
+    </div>
+    <div class="term">
+      <div class="bar"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i><span class="t">you, after the run</span></div>
+      <div class="line"><span class="green">&gt;</span> /undo</div>
+      <div class="line">Restore the state before run 3?</div>
+      <div class="line dim">3 paths change: 2 restored, 1 deleted.</div>
+      <div class="line">&nbsp;&nbsp;<span class="k">restore</span> src/cart.ts</div>
+      <div class="line">&nbsp;&nbsp;<span class="k">restore</span> src/pricing.ts</div>
+      <div class="line">&nbsp;&nbsp;<span class="red">delete</span>&nbsp; src/cart.legacy.ts</div>
+      <div class="gap"></div>
+      <div class="line"><span class="green">edit-guard:</span> restored the state before</div>
+      <div class="line">&nbsp;&nbsp;run 3: 2 written, 1 deleted.</div>
+      <div class="line">&nbsp;&nbsp;<span class="c">/undo pre-undo-1</span> reverses this.</div>
+      <div class="gap"></div>
+      <div class="line dim">your .git, index and stash: untouched</div>
+    </div>
+  </div>
+  <footer><span><b>pi install npm:@lenard9191/pi-edit-guard</b></span><span>macOS · Linux · Windows · nothing written into your repo</span></footer>
+</div>
+</body>
+</html>

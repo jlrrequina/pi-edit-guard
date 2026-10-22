@@ -9,6 +9,7 @@ A π (pi-coding-agent) extension package. `README.md` is the user-facing referen
 - **Invisible to the project.** Nothing is written inside the project or its `.git`. Calls on the project's repository are read-only (`rev-parse`, `ls-files`, with `GIT_OPTIONAL_LOCKS=0`); every other git call goes through `runGit`, on the private store, with `GIT_*` variables from the environment removed.
 - **Failure direction per invariant.** Freshness that cannot be verified blocks. A snapshot that fails allows the call, warns once per run and marks the run not covered. A loop detector that fails allows. No exception escapes a handler.
 - **The transcript is the store for session state.** Observations live in `edit-guard/observation` entries and are rebuilt from π's projection; do not add a side file.
+- **Metadata that others read is tested** (`test/package.test.ts`): the npm description (at most 250 characters), the bundled skill (π's loader must accept it, and it must document every command, message and config key), the FAQ (the same in the README, `docs/site/index.html` and its JSON-LD), the site, sitemap and Pages workflow, `llms.txt`, and the OpenSSF files (`.github/security-insights.yml`, `.bestpractices.json`). The README links unpublished files absolutely: the π catalog resolves relative links against the npm tarball.
 - **Paths as π resolves them.** `guard/paths.ts` mirrors π's resolver; `test/paths.test.ts` compares both on generated input. Keep them equal.
 
 ## Verify your changes

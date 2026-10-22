@@ -1,14 +1,25 @@
 # pi-edit-guard
 
-A π ([pi-coding-agent](https://github.com/earendil-works/pi)) extension that stops three failures of an agent that edits files, mechanically:
+**Exact `/undo`, stale-edit protection and a loop breaker for the π (pi) coding agent.** A [π](https://pi.dev) extension that blocks edits to files that changed since the agent read them, snapshots the project before each run so `/undo` restores it exactly, and stops repeated identical tool calls.
 
-1. **It writes a file it has not seen as it is now.** A write to an existing file needs a read of that file whose content still matches the disk (compare-and-swap on content).
-2. **It changes files you cannot get back.** Every run that can change files starts with a snapshot, and `/undo` restores it exactly.
-3. **It repeats a call that cannot help.** An identical call with nothing changed in between is blocked when it depends only on the files, and flagged when it can depend on something else.
+[![npm version](https://img.shields.io/npm/v/@lenard9191/pi-edit-guard)](https://www.npmjs.com/package/@lenard9191/pi-edit-guard)
+[![npm downloads](https://img.shields.io/npm/dm/@lenard9191/pi-edit-guard)](https://www.npmjs.com/package/@lenard9191/pi-edit-guard)
+[![π package](https://img.shields.io/badge/pi.dev-package-8A2BE2)](https://pi.dev/packages/@lenard9191/pi-edit-guard)
+[![CI](https://img.shields.io/github/actions/workflow/status/jlrrequina/pi-edit-guard/release.yml?branch=main&label=CI)](https://github.com/jlrrequina/pi-edit-guard/actions/workflows/release.yml?query=branch%3Amain)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jlrrequina/pi-edit-guard/badge)](https://scorecard.dev/viewer/?uri=github.com/jlrrequina/pi-edit-guard)
+[![license](https://img.shields.io/npm/l/@lenard9191/pi-edit-guard)](LICENSE)
 
 ```bash
 pi install npm:@lenard9191/pi-edit-guard
 ```
+
+![pi-edit-guard: a stale edit blocked, a repeated call stopped, and /undo restoring the state before a run](https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/docs/cover.png)
+
+It stops three failures of an agent that edits files, mechanically:
+
+1. **It writes a file it has not seen as it is now.** A write to an existing file needs a read of that file whose content still matches the disk (compare-and-swap on content).
+2. **It changes files you cannot get back.** Every run that can change files starts with a snapshot, and `/undo` restores it exactly.
+3. **It repeats a call that cannot help.** An identical call with nothing changed in between is blocked when it depends only on the files, and flagged when it can depend on something else.
 
 Nothing is written into your project or its `.git`. Everything lives under `~/.pi/agent/pi-edit-guard/`.
 
@@ -58,6 +69,8 @@ Files a write tool changes that the snapshot does not hold (an ignored `.env`, a
 | `/guard freshness on\|off`, `/guard snapshots on\|off`, `/guard loop on\|off` | One part on or off for this session. |
 
 `/undo` touches only the paths that differ, so your unrelated work stays. Paths you changed by hand during the run are reverted too: that is why it shows them first. Agents cannot call `/undo`; an agent reverts its own work with edits.
+
+The package also ships an [Agent Skill](https://agentskills.io) (`/skill:edit-guard`). The model loads it on demand to explain the guard's messages, and to point you to `/undo` when you ask it to revert its work, instead of running `git checkout`, `git stash` or `git reset`.
 
 ## Coverage
 
@@ -134,6 +147,44 @@ Most of a first snapshot is writing one git tree object per directory (django ha
 
 π 1.2.0 or later (tested with 1.2.0 and 1.3.0), Node 22.18 or later, and `git`. macOS, Linux and Windows; CI runs every test on all three. On Windows, π needs Git for Windows for its bash tool, and the guard uses the `git.exe` of that installation when `git` is not on the `PATH`.
 
+## FAQ
+
+### Does it work with Claude Code, Cursor or Codex?
+
+No. It is an extension for the π coding agent only: it works through π's extension API (tool-call events, session entries and commands).
+
+### Does it write into my project or its .git?
+
+No. Its state lives under `~/.pi/agent/pi-edit-guard/`. The project's `.git` is only read (`rev-parse`, `ls-files`): your commits, index, branches and stash are never touched. Only `/undo` writes project files, and only the ones that differ.
+
+### How is /undo different from git checkout or git stash?
+
+`/undo` restores the state before an agent run: every file git sees in the project (tracked, and untracked but not ignored), the ignored files a write tool changed, executable bits, symlinks and the case of names. Files the run created are deleted. It shows the paths first, touches only those, and leaves your commits, index, branches and stash alone. It takes a pre-undo checkpoint first, so `/undo pre-undo-<k>` reverses it.
+
+### Why was the agent's edit blocked?
+
+The file is not as the agent last read it: the agent did not read it in the current context, or its content changed since (you, a formatter or another agent edited it). One `read` repairs it. The block exists so that the agent never overwrites a change it has not seen.
+
+### Does it slow the agent down?
+
+The freshness check takes about 0.1 ms per write. A snapshot after the first takes 60–320 ms on nine public repositories, from express to symfony. The first snapshot of a project runs in the background from the session's first prompt.
+
+### Can the agent undo its own changes?
+
+No. `/undo` is a command for you, because throwing away changes in the working tree is your decision. The agent reverts its own work with edits. The bundled skill tells the agent to point you to `/undo` instead of running `git checkout`, `git stash` or `git reset`.
+
+### Does it work on Windows?
+
+Yes, with Git for Windows, which π needs for its bash tool. CI runs every test on Windows, macOS and Linux. On Windows, a symlink can be restored only with Developer Mode on or with administrator rights.
+
+## Links
+
+- npm: <https://www.npmjs.com/package/@lenard9191/pi-edit-guard>
+- π package catalog: <https://pi.dev/packages/@lenard9191/pi-edit-guard>
+- Site: <https://jlrrequina.github.io/pi-edit-guard/> · [`llms.txt`](llms.txt) for language models
+- [Changelog](CHANGELOG.md) · [Security policy](https://github.com/jlrrequina/pi-edit-guard/blob/main/SECURITY.md) · [Contributing](https://github.com/jlrrequina/pi-edit-guard/blob/main/CONTRIBUTING.md) · [Constraints for changes](https://github.com/jlrrequina/pi-edit-guard/blob/main/AGENTS.md)
+- OpenSSF: [Scorecard](https://scorecard.dev/viewer/?uri=github.com/jlrrequina/pi-edit-guard) · [Security Insights](https://github.com/jlrrequina/pi-edit-guard/blob/main/.github/security-insights.yml)
+
 ## Development
 
 ```bash
@@ -145,7 +196,7 @@ npm run corpus       # snapshot and restore of public repositories, with timings
 pi -e ./index.ts     # try the working copy
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute and [SECURITY.md](SECURITY.md) to report a vulnerability.
+See [CONTRIBUTING.md](https://github.com/jlrrequina/pi-edit-guard/blob/main/CONTRIBUTING.md) to contribute and [SECURITY.md](https://github.com/jlrrequina/pi-edit-guard/blob/main/SECURITY.md) to report a vulnerability.
 
 ## License
 

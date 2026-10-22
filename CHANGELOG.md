@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## Unreleased (minor)
+
+- **Bundled Agent Skill** `edit-guard` (`/skill:edit-guard`). The model loads it on demand to explain each `edit-guard:` message and what to do, and to point you to `/undo` when you ask it to revert its work, instead of running `git checkout`, `git stash` or `git reset`. It documents every command and configuration key. The `pi` manifest declares it, so the π catalog lists the package as an extension and a skill.
+- **OpenSSF.** The README shows the OpenSSF Scorecard badge. `.github/security-insights.yml` gives the project's security facts in the OpenSSF Security Insights 2.2.0 format, validated against the official schema. `.bestpractices.json` holds the evidence for 65 of the 67 OpenSSF Best Practices "passing" criteria and 22 of the 24 Baseline level 1 controls; bestpractices.dev reads it to fill in the badge application.
+- **Discoverability.** A landing site at <https://jlrrequina.github.io/pi-edit-guard/> with Open Graph and Twitter cards, `SoftwareApplication`, `SoftwareSourceCode` and `FAQPage` structured data and a sitemap, published by a pinned Pages workflow. `llms.txt` (llmstxt.org format) in the package and on the site. A cover image for the π catalog, the README and link previews. A README tagline, badges, an FAQ and links; more npm keywords; the npm homepage is the site.
+- Fixed: the README linked `CONTRIBUTING.md` and `SECURITY.md` relatively. The π catalog resolves relative links against the published package, which does not contain those files, so both links returned 404. They are absolute now, and a test rejects a relative link to a file that is not published.
+- Tests guard the metadata: π's loader accepts the skill, and the skill documents every command, message and configuration key; the FAQ is the same in the README, the site and its structured data; the site, the sitemap and the Pages workflow agree; `llms.txt`, the Security Insights file and the Best Practices answers link only to files that exist; the tarball smoke test requires the skill and `llms.txt`.
 
 ## 0.1.0 — 2026-10-22
 

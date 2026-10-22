@@ -12,11 +12,16 @@
     "pi",
     "pi-extension",
     "pi-coding-agent",
+    "pi-skill",
     "coding-agent",
     "ai-agent",
+    "ai-coding-assistant",
+    "llm",
     "agent-harness",
     "guardrails",
     "undo",
+    "rollback",
+    "revert",
     "checkpoints",
     "snapshots",
     "stale-read",
@@ -24,7 +29,7 @@
     "loop-detection",
     "developer-tools"
   ],
-  "homepage": "https://github.com/jlrrequina/pi-edit-guard#readme",
+  "homepage": "https://jlrrequina.github.io/pi-edit-guard/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jlrrequina/pi-edit-guard.git"
@@ -36,6 +41,8 @@
     "index.ts",
     "config.ts",
     "guard/",
+    "skills/",
+    "llms.txt",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -49,7 +56,11 @@
   "pi": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "image": "https://raw.githubusercontent.com/jlrrequina/pi-edit-guard/main/docs/cover.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=1.2.0"
