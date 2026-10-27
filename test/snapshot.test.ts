@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, describePlan, dropFollowedLinks, gitExecutable, linkedDirectories, retain, retryLocked, runGit, refuseRoot, safeSession, sweepStores, storeDir } from "../guard/snapshot.ts";
+import { findRoot, journal, listCheckpoints, needsJournal, openStore, prepareRestore, applyRestore, createCheckpoint, describePlan, dropFollowedLinks, gitExecutable, linkedDirectories, refName, retain, retryLocked, runGit, refuseRoot, safeSession, snapshotTree, sweepStores, storeDir } from "../guard/snapshot.ts";
 import type { Checkpoint, CheckpointId, Store } from "../guard/snapshot.ts";
 import { pathKey } from "../guard/paths.ts";
 import { cleanup, initRepo, projectGitState, readTree, sameTree, tempDir, writeFile, writeLink } from "./helpers.ts";
@@ -50,6 +50,17 @@ async function runWith(store: Store, n: number, mutate: (write: (abs: string) =>
   await mutate(write);
   return { ...c, commit };
 }
+
+/** Rewrite a checkpoint's commit with an older date, as if it had been taken `days` ago. */
+async function age(store: Store, session: string, c: CheckpointId, days: number): Promise<void> {
+  const ref = refName(session, c);
+  const when = Math.floor((Date.now() - days * 86_400_000) / 1000);
+  const commit = (await runGit(store, ["cat-file", "commit", ref])).stdout.toString("utf8").replace(/^(author|committer) (.*) \d+ ([+-]\d{4})$/gm, `$1 $2 ${when} $3`);
+  const oid = (await runGit(store, ["hash-object", "-t", "commit", "-w", "--stdin"], { input: commit })).stdout.toString().trim();
+  await runGit(store, ["update-ref", ref, oid]);
+}
+
+const refsOf = async (store: Store) => (await runGit(store, ["for-each-ref", "--format=%(refname)"])).stdout.toString().split("\n").filter(Boolean).sort();
 
 async function undo(store: Store, target: Checkpoint, k: number, afterRun: number) {
   const pre = { kind: "pre-undo" as const, k, afterRun };
@@ -136,6 +147,66 @@ for (const gitRoot of [true, false]) {
       assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "*.log\n.env\n");
     } finally {
       cleanup(root, base, outside);
+    }
+  });
+
+  test(`${kind}: a file ignored after a snapshot took it leaves the next snapshot, by a .gitignore line or an exclude pattern${gitRoot ? "; a file the project tracks stays" : ""}`, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      writeFile(root, "cache/built.bin", "built\n");
+      const held = async (s: Store) => (await runGit(s, ["ls-tree", "-r", "--name-only", (await snapshotTree(s)).tree])).stdout.toString().split("\n").filter(Boolean);
+      assert.ok((await held(store)).includes("cache/built.bin"));
+      writeFile(root, ".gitignore", "*.log\n.env\ncache/\nsrc/a.ts\n");
+      const after = await held(store);
+      assert.ok(!after.includes("cache/built.bin"), "ignored since the last snapshot");
+      assert.equal(after.includes("src/a.ts"), gitRoot, gitRoot ? "the project tracks it" : "no project tracks it");
+      assert.ok(!(await held(await openStore(base, await findRoot(root), ["bin/"]))).includes("bin/run.sh"), "an exclude pattern added since");
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
+  test(`${kind}: a file that left the snapshots since (ignored now) is restored when it changed, and left alone when it did not`, async () => {
+    const { root, base, outside, store } = await setup(gitRoot);
+    try {
+      writeFile(root, "data/same.bin", "same\n");
+      writeFile(root, "data/changed.bin", "before\n");
+      const run1 = await runWith(store, 1, () => {
+        writeFile(root, ".gitignore", "*.log\n.env\ndata/\n");
+        writeFile(root, "data/changed.bin", "after\n");
+      });
+      await runWith(store, 2, () => writeFile(root, "src/a.ts", "run 2\n")); // this snapshot no longer holds data/
+      const { plan, preUndo } = await undo(store, run1, 1, 2);
+      assert.deepEqual(plan.changes.map((c) => c.path).sort(), [".gitignore", "data/changed.bin", "src/a.ts"].map((r) => join(root, r)).sort());
+      assert.equal(readFileSync(join(root, "data/changed.bin"), "utf8"), "before\n");
+      assert.equal(readFileSync(join(root, "data/same.bin"), "utf8"), "same\n");
+      await undo(store, preUndo, 2, 2);
+      assert.equal(readFileSync(join(root, "data/changed.bin"), "utf8"), "after\n");
+    } finally {
+      cleanup(root, base, outside);
+    }
+  });
+
+  test(`${kind}: an ignored file that only a later snapshot held is restored from it, after a tool wrote it or a shell deleted it`, async () => {
+    for (const change of ["tool write", "shell delete"] as const) {
+      const { root, base, outside, store } = await setup(gitRoot);
+      try {
+        const run1 = await runWith(store, 1, () => writeFile(root, ".gitignore", ".env\n")); // debug.log enters the domain
+        await runWith(store, 2, async (write) => {
+          if (change === "tool write") {
+            await write(join(root, "debug.log")); // the run-2 snapshot holds it: no journal
+            writeFile(root, "debug.log", "written by the agent\n");
+          } else unlinkSync(join(root, "debug.log"));
+          writeFile(root, ".gitignore", "*.log\n.env\n"); // and it leaves the domain again
+        });
+        const final = readTree(root);
+        const { preUndo } = await undo(store, run1, 1, 2);
+        assert.equal(readFileSync(join(root, "debug.log"), "utf8"), "ignored, never touched\n", change);
+        await undo(store, preUndo, 2, 2);
+        assert.equal(sameTree(final, readTree(root)), undefined, `${change}: the undo is reversed exactly`);
+      } finally {
+        cleanup(root, base, outside);
+      }
     }
   });
 
@@ -334,7 +405,7 @@ test("refs live only in the private store, one per run; retention keeps the newe
     const refs = (await runGit(store, ["for-each-ref", "--format=%(refname)"])).stdout.toString().trim().split("\n");
     assert.deepEqual(refs.sort(), [1, 2, 3, 4, 5].map((n) => `refs/runs/${SESSION}/${n}`).sort());
     assert.deepEqual(projectGitState(root), gitBefore);
-    assert.equal(await retain(store, SESSION, 2), 3);
+    assert.equal(await retain(store, { keepRuns: 2, storeMaxAgeDays: 7 }), 3);
     const left = await listCheckpoints(store, SESSION);
     assert.deepEqual(left.filter((c) => c.commit).map((c) => (c as { n: number }).n), [4, 5]);
     assert.ok(store.dir.startsWith(base) && readFileSync(join(store.dir, "ROOT"), "utf8").trim() === root);
@@ -355,11 +426,67 @@ test("retention keeps the journal of a dropped checkpoint while a kept, older ch
     const { preUndo: pre1 } = await undo(store, run1, 1, 2); // journals .env=E1 in pre-undo-1
     assert.equal(readFileSync(join(root, ".env"), "utf8"), "SECRET=1\n");
     await undo(store, pre1, 2, 2); // redo: .env=E1, and pre-undo-2 journals .env=SECRET=1
-    assert.equal(await retain(store, SESSION, 1), 2); // drops run 1 and pre-undo-1
+    assert.equal(await retain(store, { keepRuns: 1, storeMaxAgeDays: 7 }), 2); // drops run 1 and pre-undo-1
     await undo(store, run2, 3, 2);
     assert.equal(readFileSync(join(root, ".env"), "utf8"), "SECRET=E1\n", "the state before run 2 needs pre-undo-1's journal record");
   } finally {
     cleanup(root, base, outside);
+  }
+});
+
+test("retention: in every session, checkpoints older than storeMaxAgeDays go with their journals and the objects only they held", async () => {
+  const { root, base, outside, store } = await setup(true);
+  try {
+    const run1 = { kind: "run" as const, n: 1 };
+    const run2 = { kind: "run" as const, n: 2 };
+    writeFile(root, "src/a.ts", "only the old session saw this\n");
+    await createCheckpoint(store, "old", run1);
+    await journal(store, "old", run1, join(root, ".env"));
+    const onlyOld = (await runGit(store, ["rev-parse", `${refName("old", run1)}:src/a.ts`])).stdout.toString().trim();
+    writeFile(root, "src/a.ts", "now\n");
+    await createCheckpoint(store, "old", run2);
+    await createCheckpoint(store, SESSION, run1);
+    await age(store, "old", run1, 9);
+    await age(store, "old", run2, 8);
+    assert.equal(await retain(store, { keepRuns: 20, storeMaxAgeDays: 9 }), 1, "older than 9 days: run 1 of the old session only");
+    assert.deepEqual(await refsOf(store), [refName("old", run2), refName(SESSION, run1)]);
+    assert.ok(!existsSync(join(store.dir, "journal", "old", "run-1")));
+    assert.equal(await retain(store, { keepRuns: 20, storeMaxAgeDays: 7 }), 1);
+    assert.deepEqual(await refsOf(store), [refName(SESSION, run1)]);
+    assert.ok(!existsSync(join(store.dir, "journal", "old")), "a session with no checkpoint left has no journal directory");
+    const missing = await runGit(store, ["cat-file", "-e", onlyOld], { ok: [0, 1, 128] });
+    assert.notEqual(missing.code, 0, "the content only the dropped checkpoints held is freed");
+  } finally {
+    cleanup(root, base, outside);
+  }
+});
+
+test("a root that contains the stores (a project that versions \u03c0's agent directory): no snapshot holds them, entries an older version took leave, and a restore never writes there", async () => {
+  const root = tempDir("peg-root-");
+  const base = join(root, "agent", "pi-edit-guard");
+  try {
+    writeFile(root, "src/a.ts", "a\n");
+    initRepo(root);
+    const store = await openStore(base, await findRoot(root), []);
+    // an older version took the stores into the private index and into run 1
+    const pack = "agent/pi-edit-guard/stores/0123456789abcdef/objects/pack/old.pack";
+    writeFile(root, pack, "pack before run 1\n");
+    await runGit(store, ["add", "-f", "--", "src/a.ts", pack]);
+    const tree = (await runGit(store, ["write-tree"])).stdout.toString().trim();
+    const commit = (await runGit(store, ["commit-tree", tree, "-m", `pi-edit-guard session ${SESSION} run 1`])).stdout.toString().trim();
+    await runGit(store, ["update-ref", refName(SESSION, { kind: "run", n: 1 }), commit]);
+    writeFile(root, pack, "pack after run 1\n");
+    writeFile(root, "src/a.ts", "changed\n");
+    const { commit: run2 } = await createCheckpoint(store, SESSION, { kind: "run", n: 2 });
+    const held = (await runGit(store, ["ls-tree", "-r", "--name-only", run2])).stdout.toString().split("\n").filter(Boolean);
+    assert.deepEqual(held, ["src/a.ts"]);
+    const run1 = (await listCheckpoints(store, SESSION)).find((c) => c.kind === "run" && c.n === 1)!;
+    const { plan } = await undo(store, run1, 1, 2);
+    assert.deepEqual(plan.changes.map((c) => c.path), [join(root, "src", "a.ts")]);
+    assert.equal(readFileSync(join(root, pack), "utf8"), "pack after run 1\n");
+    assert.equal(readFileSync(join(root, "src/a.ts"), "utf8"), "a\n");
+  } finally {
+    cleanup(root);
   }
 });
 
@@ -416,11 +543,11 @@ test("sweep: stores of deleted roots and stale stores go; the current store and 
     const { utimesSync } = await import("node:fs");
     const old = new Date(Date.now() - 40 * 86_400_000);
     utimesSync(join(stale.dir, "LAST_USED"), old, old);
-    const removed = await sweepStores(base, 30, keep.dir);
+    const removed = await sweepStores(base, { keepRuns: 20, storeMaxAgeDays: 30 }, keep.dir);
     assert.deepEqual(removed.sort(), [deleted.dir, stale.dir].sort());
     assert.ok(existsSync(keep.dir) && existsSync(unmounted.dir));
     assert.equal(storeDir(base, join(parent, "keep")), keep.dir);
-    assert.deepEqual(readdirSync(join(base, "stores")).sort(), [keep.dir, unmounted.dir].map((d) => d.slice(join(base, "stores").length + 1)).sort(), "nothing is left behind");
+    assert.deepEqual(readdirSync(join(base, "stores")).sort(), [".gitignore", ...[keep.dir, unmounted.dir].map((d) => d.slice(join(base, "stores").length + 1))].sort(), "nothing is left behind");
   } finally {
     cleanup(base, parent);
   }
@@ -431,10 +558,32 @@ test("sweep: a delete that an exit interrupted is finished by the next sweep", a
   try {
     const trash = join(base, "stores", "0123456789abcdef.trash-89abcdef");
     writeFile(trash, "objects/pack/half-deleted.pack", "x");
-    assert.deepEqual(await sweepStores(base, 30, join(base, "stores", "fedcba9876543210")), [trash]);
+    assert.deepEqual(await sweepStores(base, { keepRuns: 20, storeMaxAgeDays: 30 }, join(base, "stores", "fedcba9876543210")), [trash]);
     assert.ok(!existsSync(trash));
   } finally {
     cleanup(base);
+  }
+});
+
+test("sweep: in stores that stay in use, the current one included, checkpoints older than storeMaxAgeDays expire", async () => {
+  const base = tempDir();
+  const parent = tempDir();
+  try {
+    const mk = async (name: string) => {
+      writeFile(parent, `${name}/f.txt`, `${name}\n`);
+      return openStore(base, { root: join(parent, name), git: false }, []);
+    };
+    const current = await mk("current");
+    const other = await mk("other");
+    for (const store of [current, other]) {
+      await createCheckpoint(store, "old", { kind: "run", n: 1 });
+      await createCheckpoint(store, "new", { kind: "run", n: 1 });
+      await age(store, "old", { kind: "run", n: 1 }, 8);
+    }
+    assert.deepEqual(await sweepStores(base, { keepRuns: 20, storeMaxAgeDays: 7 }, current.dir), []);
+    for (const store of [current, other]) assert.deepEqual(await refsOf(store), ["refs/runs/new/1"]);
+  } finally {
+    cleanup(base, parent);
   }
 });
 

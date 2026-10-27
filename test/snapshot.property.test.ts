@@ -13,9 +13,9 @@ import { chmodSync, existsSync, lstatSync, renameSync, statSync, unlinkSync } fr
 import { join } from "node:path";
 import { test } from "node:test";
 import fc from "fast-check";
-import { pathKey } from "../guard/paths.ts";
+import { insideRoot, pathKey } from "../guard/paths.ts";
 import { applyRestore, createCheckpoint, findRoot, journal, needsJournal, openStore, prepareRestore } from "../guard/snapshot.ts";
-import type { Checkpoint, Store } from "../guard/snapshot.ts";
+import type { Checkpoint, Plan, Store } from "../guard/snapshot.ts";
 import { cleanup, initRepo, projectGitState, readTree, sameTree, tempDir, writeFile, writeLink } from "./helpers.ts";
 
 const RUNS = Number(process.env.PEG_PROPERTY_RUNS ?? 300);
@@ -191,7 +191,18 @@ async function check(gitRoot: boolean, s: Scenario): Promise<void> {
     const final = { tree: readTree(root), outside: readTree(outside) };
 
     const t = s.target % checkpoints.length;
+    // /undo writes only the paths that differ between the state now and the state it restores (a wrong delete fails the exactness checks)
+    const onlyDiffering = (p: Plan) => {
+      for (const c of p.changes) {
+        if (c.op === "delete") continue;
+        const inRoot = insideRoot(root, c.path);
+        const side = inRoot !== undefined ? "tree" : "outside";
+        const rel = inRoot ?? insideRoot(outside, c.path)!;
+        assert.notDeepEqual(final[side].get(rel), states[t]![side].get(rel), `${c.op} ${rel}: the same in both states`);
+      }
+    };
     const { plan, preUndo } = await prepareRestore(store, SESSION, checkpoints[t]!, { kind: "pre-undo", k: 1, afterRun: checkpoints.length });
+    onlyDiffering(plan);
     const applied = await applyRestore(store, plan);
     assert.deepEqual(applied.errors, []);
     assert.equal(sameTree(states[t]!.tree, readTree(root)), undefined, "root after restore");
@@ -199,6 +210,7 @@ async function check(gitRoot: boolean, s: Scenario): Promise<void> {
     if (gitBefore) assert.deepEqual(projectGitState(root), gitBefore, "project git state");
 
     const redo = await prepareRestore(store, SESSION, preUndo, { kind: "pre-undo", k: 2, afterRun: checkpoints.length });
+    onlyDiffering(redo.plan);
     assert.deepEqual((await applyRestore(store, redo.plan)).errors, []);
     assert.equal(sameTree(final.tree, readTree(root)), undefined, "root after redo");
     assert.equal(sameTree(final.outside, readTree(outside)), undefined, "outside after redo");

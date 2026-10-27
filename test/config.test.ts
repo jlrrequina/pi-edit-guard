@@ -12,7 +12,7 @@ test("defaults: all on, repeat limit 3, the documented tool classes", () => {
   assert.equal(config.freshness && config.snapshots && config.loop, true);
   assert.equal(config.repeatLimit, 3);
   assert.equal(config.keepRuns, 20);
-  assert.equal(config.storeMaxAgeDays, 30);
+  assert.equal(config.storeMaxAgeDays, 7);
   assert.deepEqual([...config.readTools], ["read"]);
   assert.deepEqual(Object.fromEntries(config.writeTools), DEFAULT_WRITE_TOOLS);
   for (const t of ["read", "grep", "find", "ls", "ffgrep", "fffind", "tool_search", "vcc_recall", "lsp_diagnostics"]) assert.ok(config.readOnlyTools.has(t), t);

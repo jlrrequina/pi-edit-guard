@@ -71,8 +71,8 @@ The user configures the guard in `~/.pi/agent/pi-edit-guard/config.json`. Every 
 | `writeTools` | `{ "edit": "path", "write": "path" }` | Tools that change exactly one file, with the argument that names it. |
 | `readOnlyTools` | `read`, `grep`, `find`, `ls` and other tools that never change files | Every other tool counts as changing files. |
 | `volatileTools` | `bash`, `codemode`, web tools and other tools whose result can depend on more than the files | They get the failure notice instead of a block. |
-| `exclude` | `[]` | More patterns the store ignores (`.gitignore` syntax). |
+| `exclude` | `[]` | More patterns the store ignores (`.gitignore` syntax). Files that match leave the next snapshot. |
 | `keepRuns` | `20` | Run checkpoints kept per session. |
-| `storeMaxAgeDays` | `30` | Stores unused for this long are deleted at session start. |
+| `storeMaxAgeDays` | `7` | Checkpoints older than this are deleted in every session; stores unused for this long are deleted at session start. |
 
 `PI_EDIT_GUARD_DEBUG=1` logs every decision to `pi-edit-guard/debug.jsonl` in the temporary directory. The full reference is the README: <https://github.com/jlrrequina/pi-edit-guard#readme>.

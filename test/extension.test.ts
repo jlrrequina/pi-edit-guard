@@ -14,7 +14,7 @@ import { runGit, storeDir } from "../guard/snapshot.ts";
 import type { Store } from "../guard/snapshot.ts";
 import { OBSERVATION_TYPE } from "../guard/state.ts";
 import { Harness } from "./harness.ts";
-import { cleanup, initRepo, projectGitState, readTree, tempDir, writeFile } from "./helpers.ts";
+import { cleanup, git, initRepo, projectGitState, readTree, tempDir, writeFile } from "./helpers.ts";
 
 function project(git = true) {
   const root = tempDir("peg-proj-");
@@ -345,6 +345,24 @@ test("retention: keepRuns from config.json keeps the newest runs of the session"
     assert.deepEqual((await p.refs()).sort(), [`refs/runs/${sid}/3`, `refs/runs/${sid}/4`]);
   } finally {
     p.done();
+  }
+});
+
+test("a project that versions \u03c0's agent directory: no checkpoint holds the stores, and the project's git does not see them", async () => {
+  const agent = tempDir("peg-agent-");
+  process.env.PI_CODING_AGENT_DIR = agent;
+  try {
+    writeFile(agent, "settings.json", "{}\n");
+    initRepo(agent);
+    const h = new Harness(agent);
+    await h.startSession();
+    await h.run(() => h.call("bash", { command: "echo 1 > notes.txt" }));
+    const store: Store = { dir: storeDir(join(agent, "pi-edit-guard"), agent), root: agent, git: true };
+    const held = (await runGit(store, ["ls-tree", "-r", "--name-only", `refs/runs/${h.sm.getSessionId()}/1`])).stdout.toString().split("\n").filter(Boolean);
+    assert.deepEqual(held, ["settings.json"], "the checkpoint holds the project, not the stores");
+    assert.equal(git(agent, "status", "--porcelain"), "?? notes.txt\n", "the stores are ignored in the project's repository");
+  } finally {
+    cleanup(agent);
   }
 });
 

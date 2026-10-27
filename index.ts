@@ -168,7 +168,7 @@ export default function piEditGuard(pi: ExtensionAPI): void {
         r.covered = true;
         r.unreadable = unreadable;
         debug("snapshot", { run: r.n, ref: refName(session, { kind: "run", n: r.n }), unreadable: unreadable.length });
-        void retain(store, session, config.keepRuns).catch((err) => debug("retain-failed", { error: message(err) }));
+        void retain(store, config).catch((err) => debug("retain-failed", { error: message(err) }));
       } catch (err) {
         uncover(ctx, r, err);
       }
@@ -235,9 +235,9 @@ export default function piEditGuard(pi: ExtensionAPI): void {
       session = "unknown";
     }
     rebuild(ctx);
-    // Stores of deleted projects and stores unused for storeMaxAgeDays go, in the background.
+    // Stores of deleted projects, stores unused for storeMaxAgeDays and older checkpoints in the others go, in the background.
     void findRoot(ctx.cwd)
-      .then((root) => sweepStores(base(), config.storeMaxAgeDays, storeDir(base(), root.root)))
+      .then((root) => sweepStores(base(), config, storeDir(base(), root.root)))
       .then(
         (removed) => removed.length && debug("sweep", { removed }),
         (err) => debug("sweep-failed", { error: message(err) }),

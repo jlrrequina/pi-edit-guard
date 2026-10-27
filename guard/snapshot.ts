@@ -3,6 +3,8 @@
  * project's own `.git`.
  *
  *   store   <base>/stores/<sha256(root)[0:16]>/   bare repository, ROOT, LAST_USED
+ *           <base>/stores/.gitignore            "*": a project that contains the stores
+ *                                                   (one that versions π's agent directory) never sees them
  *   index   <store>/index                           private, persistent (stat cache)
  *   refs    refs/runs/<session>/<n>                 state before run n
  *           refs/pre-undo/<session>/<k>             state before undo k
@@ -25,6 +27,7 @@ import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, re
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, parse as parsePath, resolve, sep, win32 } from "node:path";
 import { DEFAULT_EXCLUDES } from "../config.ts";
+import type { Config } from "../config.ts";
 import { insideRoot } from "./paths.ts";
 
 // ---------------------------------------------------------------------------
@@ -141,7 +144,7 @@ function spawnGit(args: readonly string[], cwd: string, env: NodeJS.ProcessEnv, 
 }
 
 /** Every git call on a store: `git --git-dir=<store> --work-tree=<root>` with the private index. */
-export function runGit(store: Store, args: readonly string[], opts: { input?: string | Buffer; ok?: readonly number[] } = {}): Promise<GitOutput> {
+export function runGit(store: Pick<Store, "dir" | "root">, args: readonly string[], opts: { input?: string | Buffer; ok?: readonly number[] } = {}): Promise<GitOutput> {
   return spawnGit([`--git-dir=${store.dir}`, `--work-tree=${store.root}`, ...STORE_CONFIG, ...args], store.root, gitEnv({ GIT_INDEX_FILE: join(store.dir, "index"), ...IDENTITY }), opts.input, opts.ok ?? [0]);
 }
 
@@ -243,6 +246,7 @@ export async function openStore(base: string, root: Root, exclude: readonly stri
     await mkdir(dir, { recursive: true, mode: 0o700 });
     await spawnGit(["init", "--bare", "--quiet", dir], dir, gitEnv({}), undefined, [0]);
   }
+  await writeFile(join(base, "stores", ".gitignore"), "# pi-edit-guard: private snapshot stores, never part of a project\n*\n");
   await writeFile(join(dir, "ROOT"), `${root.root}\n`);
   await mkdir(join(dir, "info"), { recursive: true });
   // A git root keeps the project's own notion of content (.gitignore files, its info/exclude);
@@ -302,20 +306,49 @@ export function safeSession(id: string): string {
 
 export type TreeResult = { tree: string; unreadable: string[] };
 
+const under = (dir: string, rel: string) => rel === dir || rel.startsWith(`${dir}/`);
+
+/**
+ * The stores directory relative to the root, when the root contains it: a project that versions π's
+ * agent directory. A snapshot that held it would copy every store, its own included, at each run.
+ */
+function storesIn(store: Store): string | undefined {
+  try {
+    return insideRoot(store.root, realpathSync.native(dirname(store.dir)));
+  } catch {
+    return undefined;
+  }
+}
+
 /** Stage the root in the private index and write its tree. Paths git cannot read are skipped and reported. */
 export async function snapshotTree(store: Store): Promise<TreeResult> {
   return withLockRetry(store, async () => {
     const links = await linkedDirectories(store);
-    const add = await runGit(store, ["add", "-A", "--ignore-errors"], { ok: [0, 1] });
+    // The private index entries an ignore rule matches, and the files the project tracks although one matches them.
+    const [ignored, tracked] = await Promise.all([
+      runGit(store, ["ls-files", "-z", "-c", "-i", "--exclude-standard"]).then((o) => o.stdout),
+      store.git ? projectGit(store.root, ["ls-files", "-z", "-c", "-i", "--exclude-standard"]).then((o) => o.stdout) : Buffer.alloc(0),
+    ]);
+    // git applies ignore rules only to files outside the index, and the private index keeps what a snapshot took: a
+    // file ignored since (a new .gitignore line, an `exclude` pattern) would stay in every later snapshot. It leaves
+    // before staging, so it is not hashed again; the project's own files stay.
+    const projects = new Set(tracked.toString("utf8").split("\0"));
+    const stale = ignored.toString("utf8").split("\0").filter((rel) => rel && !projects.has(rel));
+    if (stale.length) await runGit(store, ["update-index", "-z", "--force-remove", "--stdin"], { input: stale.join("\0") });
+    // The stores are never staged, so never hashed; entries an older version staged are dropped below.
+    const stores = storesIn(store);
+    const add = await runGit(store, ["add", "-A", "--ignore-errors", ...(stores === undefined ? [] : ["--", `:(exclude,literal)${stores}`])], { ok: [0, 1] });
     const unreadable = [...add.stderr.matchAll(/^error: unable to index file '(.*)'$/gm)].map((m) => m[1]!);
     if (add.code === 1 && unreadable.length === 0) throw new GitError("add", add);
-    if (store.git) {
-      // Files the project tracks although an ignore rule matches them are part of its content.
-      // Their names are paths, not patterns: a tracked "*.log" must not stage every ignored .log file.
-      const tracked = await projectGit(store.root, ["ls-files", "-z", "-c", "-i", "--exclude-standard"]);
-      if (tracked.stdout.length) await runGit(store, ["--literal-pathspecs", "add", "-f", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"], { input: tracked.stdout, ok: [0, 1] });
+    // Files the project tracks although an ignore rule matches them are part of its content.
+    // Their names are paths, not patterns: a tracked "*.log" must not stage every ignored .log file.
+    if (tracked.length) await runGit(store, ["--literal-pathspecs", "add", "-f", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"], { input: tracked, ok: [0, 1] });
+    const names: string[] = [];
+    const own: string[] = [];
+    for (const rel of (await runGit(store, ["ls-files", "-z"])).stdout.toString("utf8").split("\0")) {
+      if (rel) (stores !== undefined && under(stores, rel) ? own : names).push(rel);
     }
-    const names = (await runGit(store, ["ls-files", "-z"])).stdout.toString("utf8").split("\0").filter(Boolean);
+    if (own.length) await runGit(store, ["update-index", "-z", "--force-remove", "--stdin"], { input: own.join("\0") });
     await dropCaseGhosts(store, names);
     await dropFollowedLinks(store, names, links);
     const tree = text((await runGit(store, ["write-tree"])).stdout);
@@ -399,20 +432,7 @@ async function dropCaseGhosts(store: Store, names: readonly string[]): Promise<v
     if (group) group.push(rel);
     else groups.set(foldName(rel), [rel]);
   }
-  const listings = new Map<string, Promise<Set<string>>>();
-  const listed = (dirRel: string) => {
-    let names = listings.get(dirRel);
-    if (!names) {
-      names = readdir(join(store.root, ...dirRel.split("/"))).then((n) => new Set(n.map((x) => x.normalize("NFC"))), () => new Set<string>());
-      listings.set(dirRel, names);
-    }
-    return names;
-  };
-  const onDisk = async (rel: string) => {
-    const parts = rel.split("/");
-    for (let i = 0; i < parts.length; i++) if (!(await listed(parts.slice(0, i).join("/"))).has(parts[i]!.normalize("NFC"))) return false;
-    return true;
-  };
+  const onDisk = spelledAs(store.root);
   const ghosts: string[] = [];
   for (const group of groups.values()) {
     if (group.length < 2) continue;
@@ -421,6 +441,27 @@ async function dropCaseGhosts(store: Store, names: readonly string[]): Promise<v
     group.forEach((rel, i) => !real[i] && ghosts.push(rel));
   }
   if (ghosts.length) await runGit(store, ["update-index", "-z", "--force-remove", "--stdin"], { input: ghosts.join("\0") });
+}
+
+/**
+ * Whether a path under `root` is listed with this exact spelling: where case does not matter, lstat
+ * finds Foo.ts as foo.ts too, the directory listing does not. Each directory is read once.
+ */
+function spelledAs(root: string): (rel: string) => Promise<boolean> {
+  const listings = new Map<string, Promise<Set<string>>>();
+  const listed = (dirRel: string) => {
+    let names = listings.get(dirRel);
+    if (!names) {
+      names = readdir(join(root, ...dirRel.split("/"))).then((n) => new Set(n.map((x) => x.normalize("NFC"))), () => new Set<string>());
+      listings.set(dirRel, names);
+    }
+    return names;
+  };
+  return async (rel) => {
+    const parts = rel.split("/");
+    for (let i = 0; i < parts.length; i++) if (!(await listed(parts.slice(0, i).join("/"))).has(parts[i]!.normalize("NFC"))) return false;
+    return true;
+  };
 }
 
 /** Snapshot the root and keep it under the checkpoint's ref. */
@@ -433,20 +474,35 @@ export async function createCheckpoint(store: Store, session: string, c: Checkpo
   return { commit, unreadable };
 }
 
-/** Checkpoints of a session: refs, plus runs whose snapshot failed but that journaled files. */
-export async function listCheckpoints(store: Store, session: string): Promise<Checkpoint[]> {
-  const out = await runGit(store, ["for-each-ref", "--format=%(refname)%00%(objectname)%00%(creatordate:unix)%00%(subject)", `refs/runs/${session}/`, `refs/pre-undo/${session}/`]);
-  const found = new Map<string, Checkpoint>();
+/**
+ * Checkpoints by session, of one session or of all: refs, plus runs whose snapshot failed but that
+ * journaled files (dated by their journal).
+ */
+async function checkpointsBySession(store: Pick<Store, "dir" | "root">, session?: string): Promise<Map<string, Checkpoint[]>> {
+  const patterns = session === undefined ? ["refs/runs/", "refs/pre-undo/"] : [`refs/runs/${session}/`, `refs/pre-undo/${session}/`];
+  const out = await runGit(store, ["for-each-ref", "--format=%(refname)%00%(objectname)%00%(creatordate:unix)%00%(subject)", ...patterns]);
+  const sessions = new Map<string, Map<string, Checkpoint>>();
+  const add = (s: string, c: Checkpoint) => {
+    const found = sessions.get(s) ?? new Map<string, Checkpoint>();
+    sessions.set(s, found);
+    if (!found.has(checkpointName(c))) found.set(checkpointName(c), c);
+  };
   for (const line of text(out.stdout).split("\n")) {
     if (!line) continue;
-    const [, commit, created, subject] = line.split("\0");
+    const [ref, commit, created, subject] = line.split("\0");
     const run = subject?.match(/ run (\d+)$/);
     const undo = subject?.match(/ pre-undo (\d+) after run (\d+)$/);
     const c: CheckpointId | undefined = undo ? { kind: "pre-undo", k: Number(undo[1]), afterRun: Number(undo[2]) } : run ? { kind: "run", n: Number(run[1]) } : undefined;
-    if (c) found.set(checkpointName(c), { ...c, commit, created: Number(created) * 1000 });
+    if (c) add(ref!.split("/")[2]!, { ...c, commit, created: Number(created) * 1000 });
   }
-  for (const m of await readManifests(store, session)) if (!found.has(checkpointName(m.checkpoint))) found.set(checkpointName(m.checkpoint), { ...m.checkpoint });
-  return [...found.values()].sort(compareCheckpoints);
+  const journaled = session === undefined ? await readdir(join(store.dir, "journal")).catch(() => [] as string[]) : [session];
+  for (const s of journaled) for (const m of await readManifests(store, s)) add(s, { ...m.checkpoint, created: m.modified });
+  return new Map([...sessions].map(([s, found]) => [s, [...found.values()].sort(compareCheckpoints)]));
+}
+
+/** Checkpoints of a session: refs, plus runs whose snapshot failed but that journaled files. */
+export async function listCheckpoints(store: Pick<Store, "dir" | "root">, session: string): Promise<Checkpoint[]> {
+  return (await checkpointsBySession(store, session)).get(session) ?? [];
 }
 
 /** The paths among `rels` that are a file or symlink in the checkpoint's tree. */
@@ -468,9 +524,9 @@ export type JournalEntry =
 
 export type Manifest = { checkpoint: CheckpointId; entries: JournalEntry[] };
 
-const journalDir = (store: Store, session: string, c: CheckpointId) => join(store.dir, "journal", session, checkpointName(c));
+const journalDir = (store: Pick<Store, "dir">, session: string, c: CheckpointId) => join(store.dir, "journal", session, checkpointName(c));
 
-async function readManifests(store: Store, session: string): Promise<Manifest[]> {
+async function readManifests(store: Pick<Store, "dir">, session: string): Promise<(Manifest & { modified: number })[]> {
   const base = join(store.dir, "journal", session);
   let names: string[];
   try {
@@ -478,10 +534,12 @@ async function readManifests(store: Store, session: string): Promise<Manifest[]>
   } catch {
     return [];
   }
-  const out: Manifest[] = [];
+  const out: (Manifest & { modified: number })[] = [];
   for (const name of names) {
     try {
-      out.push(JSON.parse(await readFile(join(base, name, "manifest.json"), "utf8")) as Manifest);
+      const path = join(base, name, "manifest.json");
+      const [raw, st] = await Promise.all([readFile(path, "utf8"), stat(path)]);
+      out.push({ ...(JSON.parse(raw) as Manifest), modified: st.mtimeMs });
     } catch {
       // an unreadable manifest is a missing journal: its paths are not restored
     }
@@ -661,6 +719,28 @@ async function fromRecord(root: string, path: string, entry: JournalEntry, dir: 
   return { op: "copy", path, src, mode: entry.mode };
 }
 
+/** The entries whose path holds them already: the same spelling, type, content and (where the system has one) executable bit. */
+async function heldOnDisk(store: Store, entries: readonly { rel: string; mode: string; oid: string }[]): Promise<Set<string>> {
+  const spelled = spelledAs(store.root);
+  const present: { rel: string; mode: string; oid: string; path: string; st: Stats }[] = [];
+  for (const e of entries) {
+    const path = join(store.root, e.rel);
+    const st = await lstatAsTree(store.root, path);
+    if (st && (await spelled(e.rel))) present.push({ ...e, path, st });
+  }
+  const held = new Set<string>();
+  const blobs = await readBlobs(store, present.map((e) => e.oid));
+  for (const { rel, mode, oid, path, st } of present) {
+    const blob = blobs.get(oid)!;
+    const same =
+      mode === "120000"
+        ? st.isSymbolicLink() && (await readlink(path).catch(() => undefined)) === blob.toString("utf8")
+        : st.isFile() && st.size === blob.length && (windows || ((st.mode & 0o100) !== 0) === (mode === "100755")) && (await readFile(path).catch(() => undefined))?.equals(blob) === true;
+    if (same) held.add(rel);
+  }
+  return held;
+}
+
 /** rel \u2192 { mode, oid } of every entry of a checkpoint's tree. */
 async function listTree(store: Store, commit: string): Promise<Map<string, { mode: string; oid: string }>> {
   const out = new Map<string, { mode: string; oid: string }>();
@@ -681,10 +761,19 @@ async function listTree(store: Store, commit: string): Promise<Map<string, { mod
  *                                            a journal entry, or a later checkpoint's
  *                                            tree once the path entered the domain
  *   outside the root                         the earliest journal entry, if any
+ *
+ * The paths to look at: those that differ between the two trees, the journaled
+ * ones, and those a later checkpoint's tree held (a file leaves the snapshots
+ * when an ignore rule matches it since, and can stay on disk). Where no tree
+ * of the state now holds a path, the disk tells whether it changed.
  */
 async function planRestore(store: Store, session: string, target: Checkpoint, cur: string): Promise<Plan> {
   if (!target.commit) throw new Error(`${checkpointName(target)} has no snapshot`);
-  const diff = parseRawDiff((await runGit(store, ["diff-tree", "-r", "-z", "--no-renames", "--no-abbrev", "--raw", target.commit, cur])).stdout);
+  // A checkpoint taken before the stores were kept out of snapshots can hold them: a restore never writes there.
+  const stores = storesIn(store);
+  const diffTrees = async (from: string, to: string, ...filter: string[]) =>
+    parseRawDiff((await runGit(store, ["diff-tree", "-r", "-z", "--no-renames", "--no-abbrev", "--raw", ...filter, from, to])).stdout).filter((d) => stores === undefined || !under(stores, d.rel));
+  const diff = await diffTrees(target.commit, cur);
   const later = (await listCheckpoints(store, session)).filter((c) => c.commit && compareCheckpoints(c, target) > 0);
 
   const records = new Map<string, { entry: JournalEntry; dir: string; checkpoint: CheckpointId }>();
@@ -702,16 +791,19 @@ async function planRestore(store: Store, session: string, target: Checkpoint, cu
   const outsideTree: string[] = [];
   const kept: string[] = [];
   const candidates = new Set<string>();
+  /** Tree entries to restore at paths no tree of the state now holds: unless the disk holds them already. */
+  const unlessOnDisk: { rel: string; mode: string; oid: string; candidate: boolean }[] = [];
   for (const d of diff) {
     if (d.srcMode === "160000" || d.dstMode === "160000") skipped.push(d.rel);
     else if (d.status === "A") candidates.add(d.rel);
-    else {
-      const path = join(store.root, d.rel);
-      if (d.status === "D") outsideTree.push(path);
-      changes.push({ op: "blob", path, oid: d.srcOid, mode: d.srcMode });
-    }
+    else if (d.status === "D") unlessOnDisk.push({ rel: d.rel, mode: d.srcMode, oid: d.srcOid, candidate: false });
+    else changes.push({ op: "blob", path: join(store.root, d.rel), oid: d.srcOid, mode: d.srcMode });
   }
   for (const rel of recordRel.values()) if (!inTarget.has(rel)) candidates.add(rel);
+  for (const c of later) {
+    if (c.commit === cur) continue;
+    for (const d of await diffTrees(target.commit, c.commit!, "--diff-filter=A")) if (d.dstMode !== "160000") candidates.add(d.rel);
+  }
   const outside = await outsideDomain(store, target.commit, [...candidates]);
   const inCur = await treeHas(store, cur, [...candidates]);
 
@@ -756,14 +848,28 @@ async function planRestore(store: Store, session: string, target: Checkpoint, cu
       if (record && (!tree || compareCheckpoints(record.checkpoint, tree) < 0)) change = await fromRecord(store.root, path, record.entry, record.dir);
       else if (tree) {
         const then = (await entryIn(tree.commit!, rel))!;
-        const now = inCur.has(rel) ? await entryIn(cur, rel) : undefined;
-        if (!now || now.oid !== then.oid || now.mode !== then.mode) change = { op: "blob", path, oid: then.oid, mode: then.mode };
+        if (!inCur.has(rel)) {
+          unlessOnDisk.push({ rel, ...then, candidate: true });
+          continue;
+        }
+        const now = (await entryIn(cur, rel))!;
+        if (now.oid !== then.oid || now.mode !== then.mode) change = { op: "blob", path, oid: then.oid, mode: then.mode };
       }
       if (!change && (await existsAsTree(store.root, path))) kept.push(rel);
     }
     if (!change) continue;
     changes.push(change);
     if (!inCur.has(rel)) outsideTree.push(path);
+  }
+  const held = await heldOnDisk(store, unlessOnDisk);
+  for (const u of unlessOnDisk) {
+    if (held.has(u.rel)) {
+      if (u.candidate) kept.push(u.rel);
+      continue;
+    }
+    const path = join(store.root, u.rel);
+    changes.push({ op: "blob", path, oid: u.oid, mode: u.mode });
+    outsideTree.push(path);
   }
   for (const [path, record] of records) {
     if (recordRel.has(path)) continue;
@@ -959,46 +1065,58 @@ export async function dropCheckpoint(store: Store, session: string, c: Checkpoin
 // ---------------------------------------------------------------------------
 // retention
 
+export type Retention = Pick<Config, "keepRuns" | "storeMaxAgeDays">;
+
+const DAY = 86_400_000;
+
 /**
- * Keep the newest `keep` run checkpoints and the newest `keep` pre-undo
- * checkpoints of a session; drop the refs of the rest, then free their
- * objects: `repack -a -d` rewrites the packs without unreachable objects
- * (objects in the private index, which another session may have just
- * written, count as reachable), and `prune` removes unreachable loose objects
- * older than an hour (a commit another session has written but not yet
- * referenced is younger). A dropped checkpoint's journal stays while a kept
- * checkpoint is older than it: restoring that one needs the records made
- * after it. Packs are also consolidated once there are many: every snapshot
- * that adds content writes one.
+ * In every session of the store, keep the newest `keepRuns` run checkpoints
+ * and the newest `keepRuns` pre-undo checkpoints, none older than
+ * `storeMaxAgeDays`. The refs of the rest go in one transaction that expects
+ * their values: when several sessions retain at once, one drops them and frees
+ * the objects, the others fail and change nothing. Then their journals: a
+ * dropped checkpoint's journal stays while a kept checkpoint is older than it
+ * (restoring that one needs the records made after it). Then the objects:
+ * `repack -a -d` rewrites the packs without unreachable objects (objects in
+ * the private index, which another session may have just written, count as
+ * reachable), and `prune` removes unreachable loose objects older than an hour
+ * (a commit another session has written but not yet referenced is younger).
+ * Packs are also consolidated once there are many: every snapshot that adds
+ * content writes one.
  */
-export async function retain(store: Store, session: string, keep: number): Promise<number> {
-  const all = await listCheckpoints(store, session);
-  const runs = all.filter((c) => c.kind === "run").reverse();
-  const undos = all.filter((c) => c.kind === "pre-undo").reverse();
-  const kept = [...runs.slice(0, keep), ...undos.slice(0, keep)].sort(compareCheckpoints);
-  const oldestKept = kept[0];
-  const drop = [...runs.slice(keep), ...undos.slice(keep)];
-  let dropped = 0;
-  for (const c of drop) {
-    if (c.commit) {
-      await runGit(store, ["update-ref", "-d", refName(session, c)]);
-      dropped++;
+export async function retain(store: Pick<Store, "dir" | "root">, { keepRuns, storeMaxAgeDays }: Retention, now = Date.now()): Promise<number> {
+  const cutoff = now - storeMaxAgeDays * DAY;
+  const refs: string[] = [];
+  const journals: string[] = [];
+  const emptied: string[] = [];
+  for (const [session, all] of await checkpointsBySession(store)) {
+    const newest = (kind: CheckpointId["kind"]) => all.filter((c) => c.kind === kind).slice(-keepRuns);
+    const kept = new Set([...newest("run"), ...newest("pre-undo")].filter((c) => c.created === undefined || c.created >= cutoff));
+    const oldestKept = all.find((c) => kept.has(c));
+    for (const c of all) {
+      if (kept.has(c)) continue;
+      if (c.commit) refs.push(`delete ${refName(session, c)} ${c.commit}\n`);
+      if (!oldestKept || compareCheckpoints(c, oldestKept) < 0) journals.push(journalDir(store, session, c));
     }
-    if (!oldestKept || compareCheckpoints(c, oldestKept) < 0) await rm(journalDir(store, session, c), RM);
+    if (!oldestKept) emptied.push(join(store.dir, "journal", session));
   }
+  if (refs.length) await runGit(store, ["update-ref", "--stdin"], { input: refs.join("") });
+  for (const dir of journals) await rm(dir, RM);
+  for (const dir of emptied) await rmdir(dir).catch(() => {}); // a run that journals meanwhile keeps it
   const packs = (await readdir(join(store.dir, "objects", "pack")).catch(() => [] as string[])).filter((f) => f.endsWith(".pack")).length;
-  if (dropped || packs > 25) {
+  if (refs.length || packs > 25) {
     await runGit(store, ["repack", "-a", "-d", "-q"]);
     await runGit(store, ["prune", "--expire=1.hour.ago"]);
   }
-  return dropped;
+  return refs.length;
 }
 
 /**
- * Delete stores not used for `maxAgeDays`, and stores whose root was deleted
- * (its parent still exists, so an unmounted volume does not count).
+ * Delete stores not used for `storeMaxAgeDays`, and stores whose root was
+ * deleted (its parent still exists, so an unmounted volume does not count).
+ * Retain in the others, so checkpoints also expire in stores that stay in use.
  */
-export async function sweepStores(base: string, maxAgeDays: number, keepDir: string, now = Date.now()): Promise<string[]> {
+export async function sweepStores(base: string, retention: Retention, keepDir: string, now = Date.now()): Promise<string[]> {
   const dir = join(base, "stores");
   let names: string[];
   try {
@@ -1015,20 +1133,20 @@ export async function sweepStores(base: string, maxAgeDays: number, keepDir: str
         removed.push(store);
         continue;
       }
-      if (!/^[0-9a-f]{16}$/.test(name) || store === keepDir) continue;
+      if (!/^[0-9a-f]{16}$/.test(name)) continue;
       const used = await stat(join(store, "LAST_USED")).then((s) => s.mtimeMs, () => undefined);
       const root = readFileIfExists(join(store, "ROOT")).trim();
       const gone = root !== "" && !existsSync(root) && existsSync(dirname(root));
-      if ((used !== undefined && now - used > maxAgeDays * 86_400_000) || gone) {
+      if (store !== keepDir && ((used !== undefined && now - used > retention.storeMaxAgeDays * DAY) || gone)) {
         // One rename takes the store out of use. An exit during the slow delete then leaves a trash
         // directory for the next sweep, never a store without ROOT and LAST_USED that no sweep removes.
         const trash = `${store}.trash-${randomBytes(4).toString("hex")}`;
         await rename(store, trash);
         removed.push(store);
         await rm(trash, RM);
-      }
+      } else if (root !== "" && existsSync(root)) await retain({ dir: store, root }, retention, now);
     } catch {
-      // in use (Windows refuses to rename a store that another git holds open) or taken by another sweep: the next sweep retries
+      // in use (Windows refuses to rename a store that another git holds open), or taken or retained by another sweep: the next sweep retries
     }
   }
   return removed;

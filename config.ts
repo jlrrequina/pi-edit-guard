@@ -49,7 +49,7 @@ export const DEFAULTS = {
   volatileTools: ["bash", "powershell", "interactive_shell", "agent_browser", "agent_browser_code", "web_search", "fetch_content", "codemode", "run_checks"],
   exclude: [] as string[],
   keepRuns: 20,
-  storeMaxAgeDays: 30,
+  storeMaxAgeDays: 7,
 };
 
 /** Store excludes for roots that are not git work trees; a git root uses the project's own ignore rules. */
