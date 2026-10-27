@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased (minor)
+## Unreleased
+
+## 0.3.0 — 2026-10-27
 
 - **Checkpoints expire after `storeMaxAgeDays` in every session, and the default is 7 days (was 30).** Before, retention trimmed only the session that took a checkpoint. The checkpoints and journals of earlier sessions stayed as long as their store was in use, so the store of a project you use every day grew without bound. Now a checkpoint older than `storeMaxAgeDays` is deleted with its journal and the objects only it held: at session start in every store, and after each run in the current one. `keepRuns` still caps each session, and stores unused for `storeMaxAgeDays` are still deleted. The first session after the update deletes the checkpoints older than 7 days; set `storeMaxAgeDays` to keep more.
 - Fixed: a project that contains π's agent directory (one that versions `~/.pi/agent` in git) snapshotted the stores. Each snapshot copied every store, its own packs included, into its store: one such store reached 1.2 GB with a single checkpoint. An `/undo` in that project could also rewrite or delete store files. Now the stores are never staged, entries an earlier version staged leave the next snapshot, a restore never writes inside the stores, and `stores/.gitignore` keeps them out of the project's git. To get the space back at once, delete that project's store under `~/.pi/agent/pi-edit-guard/stores/` (its `ROOT` file names the project).

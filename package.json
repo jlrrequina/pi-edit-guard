@@ -1,6 +1,6 @@
 {
   "name": "@lenard9191/pi-edit-guard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Pi (π) coding-agent extension: blocks edits to files that changed since the agent read them, snapshots the project before each run so /undo restores it exactly, and stops repeated identical tool calls.",
   "type": "module",
   "license": "MIT",
