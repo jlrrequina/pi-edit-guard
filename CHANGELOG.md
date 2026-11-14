@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Tested with π 1.5.0. The tests now run on `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` 1.5.0 (0.3.0 was tested on 1.3.0) and pass, the run inside a real π session included. The oldest supported π is still 1.2.0. The extension code did not change.
+
 ## 0.3.0 — 2026-10-27
 
 - **Checkpoints expire after `storeMaxAgeDays` in every session, and the default is 7 days (was 30).** Before, retention trimmed only the session that took a checkpoint. The checkpoints and journals of earlier sessions stayed as long as their store was in use, so the store of a project you use every day grew without bound. Now a checkpoint older than `storeMaxAgeDays` is deleted with its journal and the objects only it held: at session start in every store, and after each run in the current one. `keepRuns` still caps each session, and stores unused for `storeMaxAgeDays` are still deleted. The first session after the update deletes the checkpoints older than 7 days; set `storeMaxAgeDays` to keep more.
