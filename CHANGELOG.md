@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-11-14
+
 - Tested with π 1.5.0. The tests now run on `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` 1.5.0 (0.3.0 was tested on 1.3.0) and pass, the run inside a real π session included. The oldest supported π is still 1.2.0. The extension code did not change.
 
 ## 0.3.0 — 2026-10-27
